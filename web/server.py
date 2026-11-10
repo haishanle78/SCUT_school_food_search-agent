@@ -58,7 +58,9 @@ def build_fingerprint() -> dict:
         path = PROJECT_DIR / rel
         if not path.exists():
             continue
-        raw = path.read_bytes()
+        # 换行归一化：Windows 工作区是 CRLF，git 检出/CI 是 LF，
+        # 若按原始字节哈希，同一份代码会算出不同指纹（队友会误报"线上不一致"）。
+        raw = path.read_bytes().replace(b"\r\n", b"\n")
         digest.update(rel.encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(len(raw)).encode("ascii"))
