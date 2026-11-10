@@ -1,0 +1,26 @@
+# 密钥与运行配置，绝不入库
+.env
+runtime.env
+.env.local
+*.env.local
+
+# 访客会话、画像与调用计数（运行时数据/隐私）
+data/sessions/
+data/user_profile.json
+data/map_usage.json
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 分享包 / 临时产物
+*.zip
+_js_check.js
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

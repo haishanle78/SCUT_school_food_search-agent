@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>国际校区干饭军师</title>
+<style>
+  :root {
+    --bg: #f7f4ee;
+    --card: #ffffff;
+    --accent: #f26b1d;
+    --accent-soft: #fff1e6;
+    --accent-deep: #d5540a;
+    --text: #33302b;
+    --text-soft: #8a857c;
+    --border: #ece6db;
+    --ok: #3d9a50;
+    --warn: #c98a00;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+  }
+  .app {
+    width: 100%;
+    max-width: 760px;
+    display: flex;
+    flex-direction: column;
+    background: var(--card);
+    box-shadow: 0 0 40px rgba(60, 40, 10, 0.07);
+  }
+  /* ---------- 顶栏 ---------- */
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: linear-gradient(135deg, #fff8f1 0%, #fffdfb 100%);
+  }
+  .logo {
+    width: 42px; height: 42px;
+    border-radius: 12px;
+    background: var(--accent-soft);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 25px;
+    flex-shrink: 0;
+  }
+  .title-box { flex: 1; min-width: 0; }
+  .title-box h1 { font-size: 17px; letter-spacing: 0.5px; }
+  .title-box p { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
+  .status-pill {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent-deep);
+    white-space: nowrap;
+  }
+  .icon-btn {
+    border: 1px solid var(--border);
+    background: var(--card);
+    border-radius: 10px;
+    width: 36px; height: 36px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .icon-btn:hover { border-color: var(--accent); background: var(--accent-soft); }
+  /* ---------- 筛选栏 ---------- */
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    background: #fffdfb;
+    align-items: center;
+  }
+  .filters label { font-size: 12px; color: var(--text-soft); }
+  .filters select, .filters input {
+    font-size: 12.5px;
+    font-family: inherit;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 8px;
+    background: var(--card);
+    color: var(--text);
+    outline: none;
+  }
+  .filters select:focus, .filters input:focus { border-color: var(--accent); }
+  .filters input[type="number"] { width: 64px; }
+  .filter-go {
+    font-size: 12.5px;
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 8px;
+    padding: 7px 14px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .filter-go:hover { background: var(--accent-deep); }
+  /* ---------- 消息区 ---------- */
+  .chat { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  .row { display: flex; gap: 10px; align-items: flex-start; }
+  .row.user { flex-direction: row-reverse; }
+  .avatar {
+    width: 34px; height: 34px;
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+  .row.agent .avatar { background: var(--accent-soft); }
+  .row.user .avatar { background: #eef4ee; font-size: 13px; font-weight: 600; color: var(--ok); }
+  .bubble-wrap { max-width: 82%; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .bubble {
+    padding: 12px 16px;
+    border-radius: 14px;
+    font-size: 14.5px;
+    line-height: 1.7;
+    word-break: break-word;
+  }
+  .row.agent .bubble { background: #fbf8f3; border: 1px solid var(--border); border-top-left-radius: 4px; }
+  .row.user .bubble { background: var(--accent); color: #fff; border-top-right-radius: 4px; }
+  .bubble h3 { font-size: 14.5px; margin: 8px 0 4px; color: var(--accent-deep); }
+  .bubble h3:first-child { margin-top: 0; }
+  .bubble p { margin: 4px 0; }
+  .bubble ul, .bubble ol { margin: 4px 0 4px 20px; }
+  .bubble li { margin: 3px 0; }
+  .bubble hr { border: none; border-top: 1px dashed var(--border); margin: 8px 0; }
+  .bubble code { background: #f1ece2; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  .trace { font-size: 12px; color: var(--text-soft); }
+  .trace summary { cursor: pointer; user-select: none; }
+  .trace summary:hover { color: var(--accent-deep); }
+  .trace pre {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: #f7f5f0;
+    border-radius: 8px;
+    font-size: 11.5px;
+    line-height: 1.8;
+    color: #6d675d;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    font-family: Consolas, "Courier New", monospace;
+  }
+  /* ---------- 推荐卡片 ---------- */
+  .cards-summary {
+    font-size: 12.5px;
+    color: var(--accent-deep);
+    background: var(--accent-soft);
+    padding: 8px 12px;
+    border-radius: 10px;
+    line-height: 1.6;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px 16px;
+    box-shadow: 0 2px 10px rgba(60, 40, 10, 0.05);
+  }
+  .card-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .card-rank {
+    width: 22px; height: 22px;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 12px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    align-self: center;
+  }
+  .card-name { font-size: 15px; font-weight: 700; }
+  .card-cuisine { font-size: 12px; color: var(--text-soft); }
+  .card-rating { font-size: 12px; color: #e6a700; margin-left: auto; }
+  .card-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .tag {
+    font-size: 11.5px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: #f7f5f0;
+    color: #6d675d;
+  }
+  .tag.good { background: #eef7ef; color: var(--ok); }
+  .tag.bad { background: #fdf0ee; color: #c25438; }
+  .tag.money { background: var(--accent-soft); color: var(--accent-deep); }
+  .card-text { font-size: 13px; line-height: 1.65; margin-top: 8px; color: #4d4a44; }
+  .card-text b { color: var(--text); }
+  .route-fact {
+    font-size: 11px;
+    color: var(--text-soft);
+    margin-top: 6px;
+  }
+  .card-foot { display: flex; gap: 10px; margin-top: 10px; align-items: center; }
+  .map-link {
+    font-size: 12.5px;
+    color: var(--accent-deep);
+    text-decoration: none;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: 5px 12px;
+    transition: all 0.15s;
+  }
+  .map-link:hover { background: var(--accent-soft); }
+  .delivery-flag { font-size: 12px; color: var(--text-soft); }
+  /* ---------- 正在思考 ---------- */
+  .typing { display: flex; gap: 5px; padding: 4px 0; }
+  .typing span {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: bounce 1.2s infinite;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.15s; }
+  .typing span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-6px); opacity: 1; } }
+  /* ---------- 快捷提问 ---------- */
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 20px 10px; }
+  .chip {
+    font-size: 12.5px;
+    padding: 7px 14px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text-soft);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--accent-deep); background: var(--accent-soft); }
+  /* ---------- 输入区 ---------- */
+  .input-bar {
+    display: flex;
+    gap: 10px;
+    padding: 12px 20px 16px;
+    border-top: 1px solid var(--border);
+    background: #fffdfb;
+  }
+  .input-bar input {
+    flex: 1;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    font-size: 14.5px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .input-bar input:focus { border-color: var(--accent); }
+  .send-btn {
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 12px;
+    padding: 0 22px;
+    font-size: 15px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .send-btn:hover { background: var(--accent-deep); }
+  .send-btn:disabled { background: #d8cfc2; cursor: not-allowed; }
+  /* ---------- 画像弹窗 ---------- */
+  .mask {
+    position: fixed; inset: 0;
+    background: rgba(40, 30, 15, 0.35);
+    display: none;
+    align-items: center; justify-content: center;
+    z-index: 10;
+  }
+  .mask.show { display: flex; }
+  .modal {
+    width: min(460px, 92vw);
+    max-height: 70vh;
+    overflow-y: auto;
+    background: var(--card);
+    border-radius: 16px;
+    padding: 24px;
+  }
+  .modal h2 { font-size: 17px; margin-bottom: 14px; }
+  .profile-item {
+    display: flex;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px dashed var(--border);
+    font-size: 13.5px;
+  }
+  .profile-item .k { color: var(--text-soft); flex-shrink: 0; width: 72px; }
+  .profile-item .v { flex: 1; line-height: 1.6; }
+  .modal .close-tip { margin-top: 14px; font-size: 12px; color: var(--text-soft); text-align: center; }
+  @media (max-width: 560px) {
+    .bubble-wrap { max-width: 88%; }
+    .status-pill { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="logo">🦊</div>
+    <div class="title-box">
+      <h1>国际校区干饭军师</h1>
+      <p>华工国际校区 · 吃什么 / 去哪吃 / 值不值得跑一趟</p>
+    </div>
+    <span class="status-pill" id="status">检查配置中…</span>
+    <button class="icon-btn" id="profile-btn" title="我的画像（长期记忆）">👤</button>
+    <button class="icon-btn" id="reset-btn" title="重开会话">🔄</button>
+  </header>
+
+  <!-- 条件筛选 -->
+  <div class="filters">
+    <label>口味</label>
+    <select id="f-taste">
+      <option value="">不限</option>
+      <option>辣</option><option>清淡</option><option>甜</option>
+      <option>粉面</option><option>粤菜</option><option>湘菜</option><option>川菜</option>
+    </select>
+    <label>人均≤</label>
+    <input id="f-budget" type="number" placeholder="元" min="5" max="200">
+    <label>步行≤</label>
+    <select id="f-minutes">
+      <option value="">不限</option>
+      <option value="10">10 分钟</option>
+      <option value="15">15 分钟</option>
+      <option value="20">20 分钟</option>
+    </select>
+    <label>出发</label>
+    <select id="f-origin" title="当前出发点（坐标均来自地图实测）"></select>
+    <button class="filter-go" id="filter-go">按条件找</button>
+  </div>
+
+  <div class="chat" id="chat"></div>
+
+  <div class="chips" id="chips"></div>
+
+  <div class="input-bar">
+    <input id="input" type="text" placeholder="说说你想吃什么：口味 / 预算 / 有多懒…" autocomplete="off">
+    <button class="send-btn" id="send">发送</button>
+  </div>
+</div>
+
+<!-- 用户画像弹窗 -->
+<div class="mask" id="mask">
+  <div class="modal">
+    <h2>👤 我的画像（长期记忆）</h2>
+    <div id="profile-body"></div>
+    <p class="close-tip">点击弹窗外部关闭</p>
+  </div>
+</div>
+
+<script>
+const chat = document.getElementById("chat");
+const input = document.getElementById("input");
+const sendBtn = document.getElementById("send");
+let busy = false;
+
+/* 每个访客一个独立会话：对话与画像隔离，刷新/重开浏览器仍延续 */
+let SESSION_ID = localStorage.getItem("junshi_sid");
+if (!SESSION_ID) {
+  SESSION_ID = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2));
+  localStorage.setItem("junshi_sid", SESSION_ID);
+}
+/* 发布版网关要求每个请求带 sharecode；本地开发没有就自动忽略 */
+const SHARECODE = new URLSearchParams(location.search).get("sharecode");
+const api = (path) => path + (SHARECODE ? (path.includes("?") ? "&" : "?") + "sharecode=" + encodeURIComponent(SHARECODE) : "");
+let ORIGIN_KEY = localStorage.getItem("junshi_origin") || "";
+const withSid = (body) => Object.assign({ session_id: SESSION_ID, origin: ORIGIN_KEY }, body || {});
+
+const QUICK_PROMPTS = [
+  "想吃辣的，预算30以内，不想走超过15分钟",
+  "周末和同学聚餐，6个人，人均50，能坐得下的",
+  "懒得出门，外卖有什么不踩雷的？",
+  "清淡一点的，最近吃太上火了"
+];
+
+/* ---------- 极简 Markdown 渲染 ---------- */
+function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function inline(s) {
+  return s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+function mdRender(text) {
+  const lines = esc(text).split("\n");
+  let html = "", listTag = null;
+  const closeList = () => { if (listTag) { html += "</" + listTag + ">"; listTag = null; } };
+  const openList = (tag) => { if (listTag !== tag) { closeList(); html += "<" + tag + ">"; listTag = tag; } };
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) { closeList(); continue; }
+    if (/^-{3,}$/.test(line)) { closeList(); html += "<hr>"; continue; }
+    let m;
+    if ((m = line.match(/^#{1,4}\s+(.*)$/))) { closeList(); html += "<h3>" + inline(m[1]) + "</h3>"; continue; }
+    if ((m = line.match(/^[-*]\s+(.*)$/))) { openList("ul"); html += "<li>" + inline(m[1]) + "</li>"; continue; }
+    if ((m = line.match(/^\d+[.、)）]\s*(.*)$/))) { openList("ol"); html += "<li>" + inline(m[1]) + "</li>"; continue; }
+    closeList(); html += "<p>" + inline(line) + "</p>";
+  }
+  closeList();
+  return html;
+}
+
+/* ---------- 推荐卡片（事实字段由后端按 uid 注入） ---------- */
+function renderCards(cards, summary) {
+  const wrap = document.createElement("div");
+  wrap.className = "bubble-wrap";
+  if (summary) {
+    const s = document.createElement("div");
+    s.className = "cards-summary";
+    s.innerHTML = "💡 " + esc(summary);
+    wrap.appendChild(s);
+  }
+  cards.forEach((c, i) => {
+    const card = document.createElement("div");
+    card.className = "card";
+    if (c.exceeds_walk_limit) card.style.borderColor = "var(--warn)";
+    const t = c.transport || {};
+    let tags = "";
+    if (c.price_per_person != null) tags += '<span class="tag money">人均 ¥' + esc(String(c.price_per_person)) + (c.price_source === "模型预估" ? "（预估）" : "") + "</span>";
+    else tags += '<span class="tag">人均待确认</span>';
+    if (c.route_verified) tags += '<span class="tag good">路线已核实</span>';
+    if (t.walk_min != null) tags += '<span class="tag">🚶 步行 ' + esc(String(t.walk_min)) + " 分钟</span>";
+    if (t.ride_min != null) tags += '<span class="tag">🚲 骑行 ' + esc(String(t.ride_min)) + " 分钟</span>";
+    if (t.taxi_min != null) tags += '<span class="tag">🚕 打车 ' + esc(String(t.taxi_min)) + " 分钟</span>";
+    if (c.straight_distance_m != null) tags += '<span class="tag">直线 ' + esc(String(c.straight_distance_m)) + " 米</span>";
+    if (c.delivery === true) tags += '<span class="tag good">可外卖</span>';
+    else if (c.delivery === false) tags += '<span class="tag">建议到店</span>';
+    if (c.exceeds_walk_limit) tags += '<span class="tag bad">超步行上限·替代方案</span>';
+    const addr = c.address
+      ? '<div class="card-text"><b>地址：</b>' + esc(String(c.address)) + (c.district ? "（" + esc(String(c.district)) + "）" : "") + "</div>"
+      : '<div class="card-text"><b>地址：</b>暂无法确认</div>';
+    card.innerHTML =
+      '<div class="card-head"><span class="card-rank">' + (i + 1) + "</span>"
+      + '<span class="card-name">' + esc(String(c.name || "未名店")) + "</span>"
+      + '<span class="card-cuisine">' + esc(String(c.cuisine || "")) + "</span>"
+      + "</div>"
+      + '<div class="card-meta">' + tags + "</div>"
+      + addr
+      + (c.reason ? '<div class="card-text"><b>推荐：</b>' + esc(String(c.reason)) + "</div>" : "")
+      + (c.warning ? '<div class="card-text"><b>避雷：</b>' + esc(String(c.warning)) + "</div>" : "")
+      + (c.worth_it ? '<div class="card-text"><b>值不值：</b>' + esc(String(c.worth_it)) + "</div>" : "")
+      + (t["来源"] ? '<div class="route-fact">路线来源：' + esc(String(t["来源"])) + (t["查询时间"] ? " · " + esc(String(t["查询时间"])) : "") + "</div>" : '<div class="route-fact">路线：暂无法确认</div>')
+      + '<div class="card-foot">'
+      + (c.route_link
+        ? '<a class="map-link" target="_blank" rel="noopener" href="' + esc(String(c.route_link)) + '">🗺️ 官方路线（' + esc(String(c.origin || "校区")) + ' → 这家店）</a>'
+        : '<span class="delivery-flag">暂无法生成路线链接</span>')
+      + '<span class="delivery-flag">' + (c.delivery === true ? "懒得出门也能点" : (c.delivery === false ? "建议到店吃" : "外卖待确认")) + "</span></div>";
+    wrap.appendChild(card);
+  });
+  return wrap;
+}
+
+/* ---------- 消息渲染 ---------- */
+function addRow(cls, avatarText) {
+  const row = document.createElement("div");
+  row.className = "row " + cls;
+  row.innerHTML = '<div class="avatar">' + avatarText + '</div><div class="bubble-wrap"></div>';
+  chat.appendChild(row);
+  return row.querySelector(".bubble-wrap");
+}
+function scrollBottom() { chat.scrollTop = chat.scrollHeight; }
+
+function addAgentMessage(text, trace, cards, summary) {
+  const wrap = addRow("agent", "🦊");
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.innerHTML = mdRender(text);
+  wrap.appendChild(bubble);
+  if (cards && cards.length) wrap.appendChild(renderCards(cards, summary));
+  if (trace && trace.length) {
+    const d = document.createElement("details");
+    d.className = "trace";
+    d.innerHTML = "<summary>🔍 推理过程（" + trace.length + " 步，点开看 agent 每一步在干嘛）</summary>"
+      + "<pre>" + esc(trace.join("\n")) + "</pre>";
+    wrap.appendChild(d);
+  }
+  scrollBottom();
+}
+function addWelcome() {
+  addAgentMessage(
+    "我是**国际校区干饭军师**🦊\n\n"
+    + "这边饭堂选择少、位置又偏，我来帮你解决「**吃什么 / 去哪吃 / 值不值得跑一趟**」三个问题。\n\n"
+    + "可以用上面的**条件筛选**，也可以直接说：口味、预算、能接受的步行时间。我会检索知识库、联网查店、算好路线和人均，再给你 Top3 推荐卡片。"
+  );
+}
+
+/* ---------- 状态 / 画像 / 重置 ---------- */
+function loadStatus(retry = 0) {
+  fetch(api("/api/status"), { cache: "no-store" }).then(r => r.json()).then(s => {
+    const parts = [];
+    parts.push(s.llm ? "LLM 在线" : "离线模式");
+    if (s.llm && s.llm_model) parts.push(s.llm_model);
+    if (s.map && s.map_stats) {
+      parts.push("地图检索 " + s.map_stats.daily_search + "/" + s.map_stats.daily_search_limit);
+    } else {
+      parts.push(s.map ? "百度地图已连接" : "地图未配置");
+    }
+    const pill = document.getElementById("status");
+    pill.textContent = parts.join(" · ");
+    pill.title = s.origin ? "当前出发点：" + s.origin : "";
+    pill.style.color = s.llm ? "var(--ok)" : "var(--warn)";
+  }).catch(() => {
+    const pill = document.getElementById("status");
+    if (retry < 4) {
+      pill.textContent = "服务启动中…（" + (retry + 1) + "/4）";
+      pill.style.color = "var(--warn)";
+      setTimeout(() => loadStatus(retry + 1), 3000);
+    } else {
+      pill.textContent = "连接失败，请刷新重试";
+      pill.style.color = "var(--danger)";
+    }
+  });
+}
+loadStatus();
+
+/* 保活：云端空闲会回收容器，页面开着时定时轻 ping，避免演示中途冷启动 */
+setInterval(() => {
+  if (document.visibilityState === "visible") {
+    fetch(api("/api/health"), { cache: "no-store" }).catch(() => {});
+  }
+}, 45000);
+
+fetch(api("/api/origins")).then(r => r.json()).then(d => {
+  const sel = document.getElementById("f-origin");
+  if (!sel) return;
+  sel.innerHTML = d.origins.map(o => '<option value="' + esc(o.key) + '">' + esc(o.name) + "</option>").join("");
+  ORIGIN_KEY = ORIGIN_KEY || d.default;
+  sel.value = ORIGIN_KEY;
+  sel.onchange = () => {
+    ORIGIN_KEY = sel.value;
+    localStorage.setItem("junshi_origin", ORIGIN_KEY);
+  };
+}).catch(() => {});
+
+document.getElementById("profile-btn").onclick = async () => {
+  const res = await fetch(api("/api/profile"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(withSid({})),
+  });
+  const data = await res.json();
+  const body = document.getElementById("profile-body");
+  body.innerHTML = Object.entries(data.profile)
+    .map(([k, v]) => {
+      const val = Array.isArray(v) ? (v.length ? v.join("、") : "（暂无）") : (v || "（暂无）");
+      return '<div class="profile-item"><div class="k">' + esc(k) + '</div><div class="v">' + esc(String(val)) + "</div></div>";
+    }).join("");
+  document.getElementById("mask").classList.add("show");
+};
+document.getElementById("mask").onclick = (e) => { if (e.target.id === "mask") e.target.classList.remove("show"); };
+
+document.getElementById("reset-btn").onclick = async () => {
+  if (busy) return;
+  await fetch(api("/api/reset"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(withSid({})),
+  });
+  chat.innerHTML = "";
+  addWelcome();
+};
+
+/* ---------- 筛选栏 ---------- */
+document.getElementById("filter-go").onclick = () => {
+  const taste = document.getElementById("f-taste").value;
+  const budget = document.getElementById("f-budget").value;
+  const minutes = document.getElementById("f-minutes").value;
+  if (!taste && !budget && !minutes) { input.focus(); return; }
+  let msg = "帮我找";
+  if (taste) msg += taste + "的";
+  if (budget) msg += "，人均预算 " + budget + " 元以内";
+  if (minutes) msg += "，步行不超过 " + minutes + " 分钟";
+  input.value = msg;
+  send();
+};
+
+/* ---------- 发送 ---------- */
+async function send() {
+  const text = input.value.trim();
+  if (!text || busy) return;
+  busy = true;
+  sendBtn.disabled = true;
+  input.value = "";
+  addRow("user", "我").innerHTML = '<div class="bubble">' + esc(text) + "</div>";
+  scrollBottom();
+  const typingWrap = addRow("agent", "🦊");
+  typingWrap.innerHTML = '<div class="bubble"><div class="typing"><span></span><span></span><span></span></div></div>';
+  scrollBottom();
+  try {
+    const res = await fetch(api("/api/chat"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(withSid({ message: text })),
+    });
+    const data = await res.json();
+    typingWrap.remove();
+    if (!res.ok) addAgentMessage("（暂时不能提问：" + (data.error || ("HTTP " + res.status)) + "）");
+    else if (data.error) addAgentMessage("（出错了：" + data.error + "）");
+    else addAgentMessage(data.reply, data.trace, data.cards, data.summary);
+  } catch (err) {
+    // 冷启动/网络抖动：提示并自动重试一次，而不是让用户以为坏了
+    typingWrap.innerHTML = '<div class="bubble">服务刚启动，正在重试…</div>';
+    try {
+      await new Promise((r) => setTimeout(r, 3000));
+      const res2 = await fetch(api("/api/chat"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(withSid({ message: text })),
+      });
+      const data2 = await res2.json();
+      typingWrap.remove();
+      if (!res2.ok) addAgentMessage("（暂时不能提问：" + (data2.error || ("HTTP " + res2.status)) + "）");
+      else addAgentMessage(data2.reply, data2.trace, data2.cards, data2.summary);
+    } catch (err2) {
+      typingWrap.remove();
+      addAgentMessage("（网络异常，服务可能正在启动，请稍等几秒再发一次）");
+    }
+  } finally {
+    busy = false;
+    sendBtn.disabled = false;
+    input.focus();
+  }
+}
+sendBtn.onclick = send;
+input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+
+/* ---------- 快捷提问 ---------- */
+const chipsBox = document.getElementById("chips");
+QUICK_PROMPTS.forEach((q) => {
+  const chip = document.createElement("button");
+  chip.className = "chip";
+  chip.textContent = q;
+  chip.onclick = () => { input.value = q; send(); };
+  chipsBox.appendChild(chip);
+});
+
+addWelcome();
+input.focus();
+</script>
+</body>
+</html>
