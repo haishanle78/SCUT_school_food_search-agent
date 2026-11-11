@@ -20,6 +20,7 @@ from agent.memory import UserProfile
 from tools.food_search import food_search
 from tools.route_planner import find_restaurant, plan_route, search_poi, verify_route
 from tools.budget_nutrition import estimate_budget, health_hint
+from tools.weather_gateway import get_weather
 
 Registry = Dict[str, Callable[..., str]]
 
@@ -93,6 +94,7 @@ def build_registry(
         "verify_route": _adapt(lambda uid, mode="walking": verify_route(uid, poi_store=store, mode=mode)),
         "estimate_budget": _adapt(estimate_budget),
         "health_hint": _adapt(health_hint),
+        "get_weather": _adapt(get_weather),
         "remember_preference": _adapt(lambda key, value: remember_preference(key, value, profile)),
         "format_recommendation": _adapt(format_recommendation),
     }
@@ -229,6 +231,22 @@ def build_registry(
                         "place_name": {"type": "string", "description": "店铺名称"},
                     },
                     "required": ["place_name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": (
+                    "查询当前实时天气（校区所在番禺区，含气温/现象/今日预报/出行建议）。"
+                    "用户主动问天气（『下雨了吗』『现在天气怎么样』『明天适合出门吃饭吗』）时调用；"
+                    "天气会自动注入系统提示，普通推荐任务无需调用本工具。"
+                    "服务不可用或异常时如实说明『暂时查不了天气』，不影响推荐本身，禁止编造天气。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
                 },
             },
         },

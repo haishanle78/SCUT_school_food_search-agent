@@ -46,6 +46,7 @@ BUILD_FILES = (
     "tools/route_planner.py",
     "tools/budget_nutrition.py",
     "tools/map_gateway.py",
+    "tools/weather_gateway.py",
     "web/server.py",
     "web/static/index.html",
 )

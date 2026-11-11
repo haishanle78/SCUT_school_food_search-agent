@@ -22,6 +22,7 @@ import config
 from agent.memory import ConversationMemory, UserProfile
 from llm.client import AssistantMessage, LLMClient, ToolCall
 from tools import build_registry
+from tools import weather_gateway
 from tools.route_planner import build_route_link, current_origin, set_origin
 from tools import map_gateway
 
@@ -30,10 +31,33 @@ MODE_KEYWORDS = {
     "driving": ("打车", "开车", "驾车", "滴滴", "网约车"),
 }
 
+# 天气拿不到时注入的约束。实测发现：完全不提天气，模型会顺口编
+# "现在天气晴朗，适合出门吃饭"——没有数据支撑的判断，违反"不编造"铁律。
+# 所以宁可在 prompt 里明确告诉它"查不到"，让它如实回答。
+WEATHER_UNAVAILABLE_HINT = (
+    "\n【天气数据不可用】实时天气本次获取失败（未配置或接口异常）。\n"
+    "若用户询问天气，如实说明暂时查不到实时天气；"
+    "绝对不要凭空断言“今天晴朗”“温度适宜”“适合出门”这类没有数据支撑的判断。\n"
+    "与天气无关的推荐照常进行，不要因此降低回答质量。\n\n"
+)
+
 
 def _trace(text: str) -> None:
     """推理过程可视化：答辩时评委能看到每一步在干什么。"""
     print(f"  [推理] {text}")
+
+
+def _as_price(value: Any) -> float | None:
+    """人均只接受正数。模型可能回传 '待确认' / '约30' 这类文本，
+    一律视为"无来源"（显示待确认），绝不把占位文本当成人均事实。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if num > 0 else None
 
 
 class FoodAdvisorAgent:
@@ -152,9 +176,9 @@ class FoodAdvisorAgent:
             if route.get("步行"):
                 transport["步行距离_米"] = route["步行"].get("距离_米")
 
-            # 人均：知识库有数据才算事实，否则模型值只能标"预估"
-            kb_price = poi.get("人均")
-            model_price = rec.get("price_per_person")
+            # 人均：知识库有数据才算事实，否则模型值只能标"预估"（非数字一律视为无来源）
+            kb_price = _as_price(poi.get("人均"))
+            model_price = _as_price(rec.get("price_per_person"))
             if kb_price is not None:
                 price, price_source = kb_price, "知识库"
             elif model_price is not None:
@@ -417,6 +441,44 @@ class FoodAdvisorAgent:
             query = ""
         return query, taste, budget, minutes
 
+    def _weather_context(self) -> str:
+        """实时天气 → system prompt 段落（天气感知的核心注入点）。
+
+        天气是增强项不是依赖项：WEATHER_ENABLED 为 False、接口异常、
+        任何状态非 ok，都不影响推荐主流程。
+        但此时不能什么都不说——模型会顺口编「今天晴朗、适合出门」这类没有
+        依据的话（实测过）。所以改为注入一段"数据不可用"的约束，让它如实说查不到。
+        缓存 30 分钟，每轮刷新 system prompt 不会带来额外请求。
+        """
+        if not getattr(config, "WEATHER_ENABLED", False):
+            return WEATHER_UNAVAILABLE_HINT
+        try:
+            data = weather_gateway.fetch_weather()
+        except Exception as exc:  # 天气模块任何意外都不能影响推荐主流程
+            self._trace_fn(f"天气模块异常（已忽略）: {exc}")
+            return WEATHER_UNAVAILABLE_HINT
+        if data.get("状态") != weather_gateway.OK:
+            self._trace_fn(f"天气不可用（{data.get('状态')}），本轮不注入天气")
+            return WEATHER_UNAVAILABLE_HINT
+
+        now = data.get("现在") or {}
+        sugg = data.get("建议") or {}
+        lines = [
+            f"\n【当前天气（实时，{data.get('查询时间', '')} 查询，全站缓存 30 分钟）】"
+            f"{data.get('位置', '')} {now.get('现象', '')} {now.get('气温', '')}°C",
+            f"天气策略（后端确定性规则，直接遵循，不要自行从天气推断）：{sugg.get('提示文案', '')}",
+        ]
+        if sugg.get("外卖优先"):
+            lines.append(
+                "雨天执行规则：支持外卖的门店排前面；堂食店只把步行 ≤ 10 分钟的作为首选，"
+                "更远的降为替代方案并注明雨天因素；回答里提一句下雨的推荐理由。"
+            )
+        elif sugg.get("场景") == "hot":
+            lines.append("高温执行规则：优先步行 ≤ 15 分钟的近店，主动提醒防暑，远店建议打车。")
+        else:
+            lines.append("天气适宜出行，按用户需求正常推荐即可。")
+        return "\n".join(lines) + "\n\n"
+
     # ---------- System Prompt：人设 + 意图分流 + 工具策略 ----------
     def _system_prompt(self) -> str:
         return (
@@ -456,5 +518,6 @@ class FoodAdvisorAgent:
             f"【当前出发点】{self.origin['name']}（坐标来自地图实测，检索与路线均以此为起点）\n"
             "如果用户说『从南门/北门走』，提示他可以在页面顶部切换出发点；"
             "系统没有手机实时定位，不要声称知道用户的当前位置。\n\n"
+            f"{self._weather_context()}"
             f"【用户画像（长期记忆）】\n{self.profile.as_prompt_text()}"
         )
