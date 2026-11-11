@@ -93,6 +93,14 @@ CANTEEN_PATH = os.path.join(DATA_DIR, "canteen.json")
 DELIVERY_PATH = os.path.join(DATA_DIR, "delivery.json")
 PROFILE_PATH = os.path.join(DATA_DIR, "user_profile.json")
 
+# ---------- 知识库（评分与评价检索） ----------
+# 真实评价语料：一行一条 JSON（字段见 data/kb/README.md）
+KB_DIR = os.path.join(DATA_DIR, "kb")
+KB_REVIEWS_PATH = os.path.join(KB_DIR, "reviews.jsonl")
+# 演示模式：只用 data/examples/demo_*.json 跑界面与接口，绝不与真实库混用
+KB_DEMO = os.getenv("KB_DEMO", "").strip().lower() in {"1", "true", "yes", "on"}
+KB_MIN_SAMPLES = int(os.getenv("KB_MIN_SAMPLES", "3"))  # 少于该样本数不出均值，只报样本数
+
 # ---------- 地图调用治理（控制额度，避免触发并发/配额限制） ----------
 # 百度个人开发者默认权益：地点检索 100 次/日、3 次/秒；路线规划 5000 次/日、3 次/秒。
 # 这里留余量：默认 2 QPS、检索 80 次/日、路线 4000 次/日。以控制台实际配置为准。
