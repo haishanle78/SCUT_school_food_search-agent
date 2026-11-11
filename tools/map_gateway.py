@@ -178,6 +178,26 @@ def _roll_day_locked() -> None:
         _save_usage_locked()
 
 
+def _sync_usage_locked() -> None:
+    """重新读取磁盘计数并与内存取最大值。
+
+    多进程并行（服务 + 数据维护脚本）时，各进程在启动时快照一次计数，
+    之后各自保存会互相覆盖（先启动的进程用旧计数抹掉新计数，导致额度被
+    意外"重置"）。每次取名额前以磁盘为准同步，可容忍毫秒级竞态。
+    """
+    path = getattr(config, "MAP_USAGE_PATH", "")
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if data.get("day") == _usage_day:
+            for key in ("search", "route"):
+                _usage[key] = max(_usage[key], int(data.get(key, 0)))
+    except (OSError, ValueError):
+        pass
+
+
 def _reserve(kind: str) -> Optional[str]:
     """取一个调用名额：先查日配额，再按全局 QPS 排队。返回 None 表示可以发请求。"""
     global _tokens, _last_refill
@@ -186,6 +206,7 @@ def _reserve(kind: str) -> Optional[str]:
     while True:
         with _lock:
             _roll_day_locked()
+            _sync_usage_locked()
             if _usage[kind] >= limit:
                 _stats["quota"] += 1
                 return QUOTA_EXHAUSTED
