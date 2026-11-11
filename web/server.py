@@ -19,7 +19,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 项目根加入搜索路径
 
@@ -27,6 +27,7 @@ import config
 from agent.core import FoodAdvisorAgent, _trace
 from agent.memory import ConversationMemory, UserProfile
 from tools import map_gateway
+from tools import kb_search as kb
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -46,6 +47,8 @@ BUILD_FILES = (
     "tools/route_planner.py",
     "tools/budget_nutrition.py",
     "tools/map_gateway.py",
+    "tools/kb_index.py",
+    "tools/kb_search.py",
     "web/server.py",
     "web/static/index.html",
 )
@@ -207,6 +210,46 @@ class Handler(BaseHTTPRequestHandler):
                     for p in config.ORIGIN_PRESETS
                 ],
             })
+        elif path == "/api/kb/status":
+            # 知识库规模（门店数/评价数/是否演示数据），前端顶部展示
+            self._send(200, kb.kb_status())
+        elif path == "/api/kb/search":
+            params = parse_qs(urlparse(self.path).query)
+
+            def value(key: str, default: str = "") -> str:
+                return (params.get(key) or [default])[0]
+
+            try:
+                max_price = float(value("max_price")) if value("max_price") else None
+            except ValueError:
+                max_price = None
+            try:
+                max_walk = int(value("max_walk")) if value("max_walk") else None
+            except ValueError:
+                max_walk = None
+
+            items = kb.search_stores(
+                query=value("q"),
+                scene=value("scene"),
+                max_price=max_price,
+                max_walk=max_walk,
+                tag=value("tag"),
+                sort=value("sort", "relevance"),
+            )
+            self._send(200, {
+                "demo": kb.is_demo(),
+                "total": len(items),
+                "items": items,
+                "status": kb.kb_status(),
+            })
+        elif path == "/api/kb/store":
+            params = parse_qs(urlparse(self.path).query)
+            name = (params.get("name") or [""])[0]
+            detail = kb.store_detail(name)
+            if detail is None:
+                self._send(404, {"error": "知识库中没有这家店", "name": name})
+            else:
+                self._send(200, {"demo": kb.is_demo(), "store": detail})
         else:
             self._send(404, {"error": "not found"})
 
