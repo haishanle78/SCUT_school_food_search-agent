@@ -44,12 +44,36 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip() or (
 )
 LLM_TEMPERATURE = 0.4  # 推荐类任务要稳，别太发散
 
+# 多 Key 分流：逗号分隔。兼容旧的单 Key 变量（OPENAI_API_KEY / DEEPSEEK_API_KEY）。
+_keys_raw = os.getenv("OPENAI_API_KEYS", "") or os.getenv("DEEPSEEK_API_KEYS", "")
+LLM_KEYS = [k.strip() for k in _keys_raw.split(",") if k.strip()]
+if not LLM_KEYS and LLM_API_KEY and "在此填入" not in LLM_API_KEY:
+    LLM_KEYS = [LLM_API_KEY]
+
 # 占位 key 检测：.env 里还是模板文本时视为未配置
-LLM_ENABLED = bool(LLM_PROVIDER in {"deepseek", "openai"} and LLM_API_KEY and "在此填入" not in LLM_API_KEY)
+LLM_ENABLED = bool(LLM_PROVIDER in {"deepseek", "openai"} and LLM_KEYS)
+
+# ---------- LLM 并发治理（Key 池） ----------
+# glm-4-flash 免费档：单 Key 并发上限 2；上下文超 8K token 后速率被大幅限制。
+LLM_CONCURRENCY_PER_KEY = int(os.getenv("LLM_CONCURRENCY_PER_KEY", "2"))   # 单 Key 并发路数
+LLM_QUEUE_WAIT = float(os.getenv("LLM_QUEUE_WAIT", "10"))                  # 排队等待上限（秒），超时返回"稍后再试"
+LLM_BREAKER_COOLDOWN = int(os.getenv("LLM_BREAKER_COOLDOWN", "600"))       # Key 限流后的熔断时长（秒）
+# 上下文字符预算（messages + tools 的 JSON 总字符数）。中文约 1 字符 ≈ 1 token，
+# 14000 字符 ≈ 8K token 出头，超限会主动裁剪，避免触发智谱的 8K 限速档。
+LLM_CONTEXT_CHAR_LIMIT = int(os.getenv("LLM_CONTEXT_CHAR_LIMIT", "14000"))
+TOOL_RESULT_MAX_CHARS = int(os.getenv("TOOL_RESULT_MAX_CHARS", "600"))     # 裁剪时单条工具结果保留长度
 
 # ---------- 地图 ----------
+# 多 AK 分流：逗号分隔（每个 AK 需为服务端类型应用，不勾 SN 校验）。
+# 兼容旧的单 AK 变量 BAIDU_MAP_AK。
+_aks_raw = os.getenv("BAIDU_MAP_AKS", "")
+BAIDU_MAP_AKS = [a.strip() for a in _aks_raw.split(",") if a.strip()]
 BAIDU_MAP_AK = os.getenv("BAIDU_MAP_AK", "").strip()
-MAP_ENABLED = bool(BAIDU_MAP_AK)
+if not BAIDU_MAP_AKS and BAIDU_MAP_AK:
+    BAIDU_MAP_AKS = [BAIDU_MAP_AK]
+if BAIDU_MAP_AKS and not BAIDU_MAP_AK:
+    BAIDU_MAP_AK = BAIDU_MAP_AKS[0]
+MAP_ENABLED = bool(BAIDU_MAP_AKS)
 
 # 出发点：华工广州国际校区（番禺区南村镇兴业大道东777号）
 # 坐标系：百度 bd09ll。以下校门坐标均由百度地图地点检索实测获得（2026-11-10），
@@ -94,8 +118,9 @@ DELIVERY_PATH = os.path.join(DATA_DIR, "delivery.json")
 PROFILE_PATH = os.path.join(DATA_DIR, "user_profile.json")
 
 # ---------- 地图调用治理（控制额度，避免触发并发/配额限制） ----------
-# 百度个人开发者默认权益：地点检索 100 次/日、3 次/秒；路线规划 5000 次/日、3 次/秒。
-# 这里留余量：默认 2 QPS、检索 80 次/日、路线 4000 次/日。以控制台实际配置为准。
+# 百度个人开发者默认权益（每把 AK）：地点检索 100 次/日、3 次/秒；路线规划 5000 次/日、3 次/秒。
+# 下面两个日配额是【每把 AK】的额度，池子总容量 = 配额 × AK 数量。留余量：默认 2 QPS、
+# 检索 80 次/日、路线 4000 次/日。以控制台实际配置为准。
 MAP_QPS = float(os.getenv("MAP_QPS", "2"))                    # 服务端全局限速（跨会话共享）
 MAP_DAILY_SEARCH = int(os.getenv("MAP_DAILY_SEARCH", "80"))   # 地点检索日上限
 MAP_DAILY_ROUTE = int(os.getenv("MAP_DAILY_ROUTE", "4000"))   # 路线规划日上限

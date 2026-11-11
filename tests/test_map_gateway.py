@@ -45,7 +45,7 @@ class FakeTransport:
 
     def __enter__(self):
         self.original = gw._do_http
-        def wrapper(path, params):
+        def wrapper(path, params, ak=None):
             self.calls.append((path, dict(params)))
             return self.handler(path, params)
         gw._do_http = wrapper

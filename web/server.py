@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 项目根加�
 import config
 from agent.core import FoodAdvisorAgent, _trace
 from agent.memory import ConversationMemory, UserProfile
+from llm.client import get_pool
 from tools import map_gateway
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -178,6 +179,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {
                 "llm": config.LLM_ENABLED,
                 "llm_model": config.LLM_MODEL if config.LLM_ENABLED else "",
+                "llm_pool": get_pool().snapshot() if config.LLM_ENABLED else None,
                 "map": config.MAP_ENABLED,
                 "origin": f"{origin['name']}（{origin['coord']}）",
                 "build": BUILD["hash"],
