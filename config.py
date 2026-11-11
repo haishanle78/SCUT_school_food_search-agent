@@ -7,6 +7,20 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _strip_inline_comment(value: str) -> str:
+    """去掉行尾 # 注释，但保留引号内的 #（模板里大量使用行尾注释）。"""
+    value = value.strip()
+    if not value:
+        return value
+    if value[0] in {'"', "'"}:
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end > 0:
+            return value[1:end].strip()
+        return value[1:].strip()
+    return value.split("#", 1)[0].strip()
+
+
 def load_dotenv(path: str, override: bool = False) -> None:
     if not os.path.exists(path):
         return
@@ -17,7 +31,7 @@ def load_dotenv(path: str, override: bool = False) -> None:
                 continue
             key, value = line.split("=", 1)
             key = key.strip()
-            value = value.strip().strip('"').strip("'")
+            value = _strip_inline_comment(value)
             if key and value and (override or not os.getenv(key)):
                 os.environ[key] = value
 
