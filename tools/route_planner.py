@@ -328,8 +328,10 @@ def find_restaurant(
         return json.dumps({"提示": "请告诉我店名，我帮你查具体位置和路线"}, ensure_ascii=False)
 
     # 1) 本地真实知识库（有别名与核实日期，最可信）
+    #    但坐标缺失时不能就此收工：本地记录只能证明「这家店存在」，
+    #    证明不了它在哪。此时继续联网检索，把坐标补上。
     kb = _kb_lookup(store_name)
-    if kb:
+    if kb and str(kb.get("坐标") or "").strip():
         coord = kb.get("坐标")
         return json.dumps(
             {

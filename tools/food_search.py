@@ -1,18 +1,28 @@
-"""美食检索官：在本地知识库中按条件筛选。
+"""美食检索官：先查本地知识库，无匹配时自动联网（百度地图）检索。
 
-数据来源（合规）：大众点评/小红书内容的人工整理 + 学生问卷实测。
+数据来源（合规）：
+  - 本地知识库：大众点评/小红书内容的人工整理 + 学生问卷实测；
+  - 联网兜底：百度地图地点检索（出发点 3 公里内真实门店，带 uid/坐标）。
 示例数据已隔离到 data/examples/（仅作字段模板参考），正式推荐
-只使用 data/ 下的真实数据——没有真实数据时明确说明并引导联网，
-绝不返回示例数据冒充真实门店。
+只使用 data/ 下的真实数据与地图实时返回的门店，绝不返回示例数据冒充真实门店。
+
+检索顺序：
+  1. 本地知识库有匹配 → 只返回本地结果（不消耗地图额度）；
+  2. 本地无匹配且有关键词 → 自动调 search_poi 联网检索，返回真实门店
+     （写入会话 poi_store，后续 verify_route / 推荐卡片用同一 uid 引用）；
+  3. 联网失败（限流/配额/网络）→ 如实返回状态说明，不编造门店。
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import config
+
+# 场景词没有对应的地图品类可搜，联网兜底跳过（本地库按场景字段过滤）
+_SCENE_WORDS = {"外卖", "外卖推荐", "聚餐", "聚会"}
 
 
 def _load(path: str) -> List[Dict[str, Any]]:
@@ -104,49 +114,113 @@ def _match(item: Dict[str, Any], query: str, taste: str, budget_max: float | Non
     return True
 
 
-def food_search(query: str, taste: str = "", budget_max: float | None = None, max_minutes: int | None = None) -> str:
-    """检索知识库，返回 Top5（按学生评分降序、步行时间升序）。"""
+# ---------------- 联网兜底（百度地图） ----------------
+
+
+def _online_fallback(keyword: str, poi_store: Optional[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """联网检索兜底。返回 (在线条目列表, 状态说明)；说明非 None 表示联网不可用/无结果。"""
+    from tools import route_planner as rp  # 惰性导入，避免包初始化顺序问题
+
+    try:
+        raw = rp.search_poi(keyword, poi_store=poi_store if poi_store is not None else {})
+        data = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001 —— 联网失败不能拖垮本地检索
+        return [], f"联网检索异常：{exc}"
+    if data.get("状态") != "ok":
+        note = data.get("提示") or data.get("建议") or "联网检索暂不可用"
+        return [], note
+    return data.get("结果") or [], None
+
+
+def food_search(
+    query: str,
+    taste: str = "",
+    budget_max: float | None = None,
+    max_minutes: int | None = None,
+    poi_store: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> str:
+    """先查本地知识库；无匹配时自动联网（百度地图 3 公里内真实门店）。
+
+    本地结果按学生评分降序、步行时间升序；联网结果按直线距离升序，带 uid。
+    """
     if budget_max is not None:
         budget_max = float(budget_max)
     if max_minutes is not None:
         max_minutes = int(max_minutes)
 
-    hits = [p for p in _all_places() if _match(p, query, taste, budget_max, max_minutes)]
+    places = _all_places()
+    hits = [p for p in places if _match(p, query, taste, budget_max, max_minutes)]
     hits.sort(key=lambda p: (-float(p.get("学生评分", 0) or 0), int(p.get("交通", {}).get("步行", 0) or 0)))
 
-    if not hits:
-        if not _all_places():
-            return json.dumps(
-                {
-                    "提示": "本地知识库暂无真实数据（示例数据已隔离，不用于正式推荐）",
-                    "下一步": "必须改用 search_poi 联网检索周边真实门店，检索结果会带 uid/地址/坐标/距离，再用 verify_route 核实路线",
-                },
-                ensure_ascii=False,
-            )
+    # ---- ① 本地有匹配：只返回本地结果，不消耗地图额度 ----
+    if hits:
         return json.dumps(
-            {"提示": "知识库有真实数据但无匹配结果", "建议": "可用 search_poi 联网搜索，或放宽口味/预算/时间约束"},
+            {
+                "结果": [
+                    {
+                        "名称": p.get("名称") or p.get("店名") or p.get("窗口名"),
+                        "类别": p.get("类别"),
+                        "菜系": p.get("菜系"),
+                        "人均": p.get("人均"),
+                        "招牌菜": p.get("招牌菜"),
+                        "交通": p.get("交通"),
+                        "营业时间": p.get("营业时间"),
+                        "高峰时段": p.get("高峰时段"),
+                        "适合聚餐人数": p.get("适合聚餐人数"),
+                        "学生评分": p.get("学生评分"),
+                        "避雷": p.get("避雷"),
+                        "一句话点评": p.get("一句话点评"),
+                        "uid": p.get("地图uid"),
+                        "坐标": p.get("坐标"),
+                        "来源": "知识库",
+                    }
+                    for p in hits[:5]
+                ]
+            },
             ensure_ascii=False,
         )
 
-    return json.dumps(
-        {
+    # ---- ② 本地无匹配：自动联网兜底（仅限可搜索的具体关键词） ----
+    online_kw = query if (query and query not in _SCENE_WORDS) else (taste if taste else "")
+    online_items: List[Dict[str, Any]] = []
+    online_note: Optional[str] = None
+    if online_kw and config.MAP_ENABLED:
+        online_items, online_note = _online_fallback(online_kw, poi_store)
+
+    if online_items:
+        out: Dict[str, Any] = {
+            "联网检索": f"知识库无「{online_kw}」匹配，已自动联网检索百度地图（出发点 3 公里内真实门店）",
             "结果": [
                 {
-                    "名称": p.get("名称") or p.get("店名") or p.get("窗口名"),
-                    "类别": p.get("类别"),
-                    "菜系": p.get("菜系"),
-                    "人均": p.get("人均"),
-                    "招牌菜": p.get("招牌菜"),
-                    "交通": p.get("交通"),
-                    "营业时间": p.get("营业时间"),
-                    "高峰时段": p.get("高峰时段"),
-                    "适合聚餐人数": p.get("适合聚餐人数"),
-                    "学生评分": p.get("学生评分"),
-                    "避雷": p.get("避雷"),
-                    "一句话点评": p.get("一句话点评"),
+                    "名称": it.get("名称"),
+                    "类别": "联网检索",
+                    "菜系": it.get("查询品类") or online_kw,
+                    "人均": None,
+                    "地址": it.get("地址"),
+                    "直线距离_米": it.get("直线距离_米"),
+                    "坐标": it.get("坐标"),
+                    "uid": it.get("uid"),
+                    "来源": "联网（百度地图）",
                 }
-                for p in hits[:5]
-            ]
-        },
-        ensure_ascii=False,
-    )
+                for it in online_items[:8]
+            ],
+        }
+        if budget_max is not None or max_minutes is not None:
+            out["联网检索"] += "（联网结果未按预算/步行筛选，请按需 verify_route 核实后再推荐）"
+        return json.dumps(out, ensure_ascii=False)
+
+    # ---- ③ 两边都没有：如实说明 ----
+    out = {"结果": []}
+    if online_note is not None:
+        out["联网检索"] = online_note
+        out["建议"] = "本地知识库无匹配，联网检索暂不可用；可放宽口味/预算/时间约束稍后再试"
+    elif online_kw:
+        out["提示"] = f"本地知识库与联网检索均无「{online_kw}」匹配"
+        out["建议"] = "可放宽口味/预算/时间约束，或用 search_poi 换品类词重查"
+    elif not places:
+        out["提示"] = "本地知识库暂无真实数据（示例数据已隔离，不用于正式推荐）"
+        out["下一步"] = "必须改用 search_poi 联网检索周边真实门店，检索结果会带 uid/地址/坐标/距离，再用 verify_route 核实路线"
+    else:
+        out["提示"] = "知识库有真实数据但无匹配结果"
+        out["建议"] = "可放宽口味/预算/时间约束后重试"
+    return json.dumps(out, ensure_ascii=False)
