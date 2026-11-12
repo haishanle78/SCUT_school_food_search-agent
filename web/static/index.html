@@ -295,6 +295,109 @@
   .profile-item .k { color: var(--text-soft); flex-shrink: 0; width: 72px; }
   .profile-item .v { flex: 1; line-height: 1.6; }
   .modal .close-tip { margin-top: 14px; font-size: 12px; color: var(--text-soft); text-align: center; }
+  /* ---------- 视图切换 ---------- */
+  .tabs { display: flex; gap: 4px; padding: 10px 20px 0; background: #fffdfb; }
+  .tab {
+    font-size: 13px;
+    padding: 8px 16px;
+    border-radius: 10px 10px 0 0;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--text-soft);
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .tab.active { color: var(--accent-deep); border-bottom-color: var(--accent); font-weight: 600; }
+  .view { display: none; flex-direction: column; flex: 1; min-height: 0; }
+  .view.active { display: flex; }
+  /* ---------- 知识库检索页 ---------- */
+  .kb-scroll { flex: 1; overflow-y: auto; padding: 0 20px 24px; }
+  .kb-head { padding: 16px 0 6px; }
+  .kb-title { font-size: 16px; }
+  .kb-meta { font-size: 12px; color: var(--text-soft); margin-top: 4px; line-height: 1.6; }
+  .kb-search { display: flex; gap: 8px; margin: 10px 0 12px; }
+  .kb-search input {
+    flex: 1;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 11px 14px;
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .kb-search input:focus { border-color: var(--accent); }
+  .kb-search button {
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 12px;
+    padding: 0 18px;
+    font-size: 14px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .kb-search button:hover { background: var(--accent-deep); }
+  .kb-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .kb-chip {
+    font-size: 12px;
+    padding: 5px 11px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text-soft);
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+  }
+  .kb-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-deep); }
+  .kb-banner {
+    font-size: 12px;
+    padding: 9px 12px;
+    border-radius: 10px;
+    margin-bottom: 12px;
+    background: var(--accent-soft);
+    color: var(--accent-deep);
+    line-height: 1.6;
+  }
+  .kb-card {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 13px 15px;
+    margin-bottom: 10px;
+    background: var(--card);
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .kb-card:hover { border-color: var(--accent); }
+  .kb-row { display: flex; align-items: baseline; gap: 8px; }
+  .kb-name { font-size: 14.5px; font-weight: 600; }
+  .kb-cat { font-size: 11.5px; color: var(--text-soft); }
+  .kb-score { margin-left: auto; display: flex; gap: 5px; align-items: baseline; flex-shrink: 0; }
+  .kb-rating { font-size: 13.5px; color: var(--warn); font-weight: 600; }
+  .kb-count { font-size: 11.5px; color: var(--text-soft); }
+  .kb-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .kb-tag { font-size: 11.5px; padding: 3px 8px; border-radius: 6px; background: #f6f2ea; color: var(--text-soft); }
+  .kb-tag.good { background: #eef7ef; color: var(--ok); }
+  .kb-tag.bad { background: #fdf0e8; color: var(--accent-deep); }
+  .kb-quote {
+    margin-top: 9px;
+    padding-left: 9px;
+    border-left: 2px solid var(--border);
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: #5d5850;
+  }
+  .kb-quote .src { color: var(--text-soft); font-size: 11.5px; }
+  .kb-empty { padding: 40px 0; text-align: center; font-size: 13px; color: var(--text-soft); line-height: 1.8; }
+  .kb-dist { margin-top: 12px; }
+  .kb-dist-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; color: var(--text-soft); }
+  .kb-bar { flex: 1; height: 6px; border-radius: 3px; background: #f0ebe2; overflow: hidden; }
+  .kb-bar > i { display: block; height: 6px; background: var(--accent); }
+  .kb-review { border-bottom: 1px dashed var(--border); padding: 9px 0; font-size: 12.5px; line-height: 1.7; }
+  .kb-review:last-child { border-bottom: none; }
+  .kb-review .meta { font-size: 11.5px; color: var(--text-soft); margin-top: 3px; }
   @media (max-width: 560px) {
     .bubble-wrap { max-width: 88%; }
     .status-pill { display: none; }
@@ -314,6 +417,12 @@
     <button class="icon-btn" id="reset-btn" title="重开会话">🔄</button>
   </header>
 
+  <nav class="tabs">
+    <button class="tab active" data-view="chat">AI 推荐</button>
+    <button class="tab" data-view="kb">浏览检索</button>
+  </nav>
+
+  <div class="view active" id="view-chat">
   <!-- 条件筛选 -->
   <div class="filters">
     <label>口味</label>
@@ -344,6 +453,24 @@
     <input id="input" type="text" placeholder="说说你想吃什么：口味 / 预算 / 有多懒…" autocomplete="off">
     <button class="send-btn" id="send">发送</button>
   </div>
+  </div><!-- /view-chat -->
+
+  <!-- 知识库独立检索页：只读本地索引，不调用大模型与地图接口 -->
+  <div class="view" id="view-kb">
+    <div class="kb-scroll">
+      <div class="kb-head">
+        <div class="kb-title">找吃的</div>
+        <div class="kb-meta" id="kb-meta">知识库加载中…</div>
+      </div>
+      <div class="kb-search">
+        <input id="kb-q" type="text" placeholder="搜菜品、窗口、店名，或「十块钱能吃饱」" autocomplete="off">
+        <button id="kb-go">搜索</button>
+      </div>
+      <div class="kb-filters" id="kb-filters"></div>
+      <div id="kb-banner"></div>
+      <div id="kb-results"><div class="kb-empty">正在加载知识库…</div></div>
+    </div>
+  </div>
 </div>
 
 <!-- 用户画像弹窗 -->
@@ -351,6 +478,15 @@
   <div class="modal">
     <h2>👤 我的画像（长期记忆）</h2>
     <div id="profile-body"></div>
+    <p class="close-tip">点击弹窗外部关闭</p>
+  </div>
+</div>
+
+<!-- 店铺详情弹窗（知识库） -->
+<div class="mask" id="kb-mask">
+  <div class="modal">
+    <h2 id="kb-detail-title">店铺详情</h2>
+    <div id="kb-detail"></div>
     <p class="close-tip">点击弹窗外部关闭</p>
   </div>
 </div>
@@ -423,10 +559,16 @@ function renderCards(cards, summary) {
     if (c.price_per_person != null) tags += '<span class="tag money">人均 ¥' + esc(String(c.price_per_person)) + (c.price_source === "模型预估" ? "（预估）" : "") + "</span>";
     else tags += '<span class="tag">人均待确认</span>';
     if (c.route_verified) tags += '<span class="tag good">路线已核实</span>';
+    if (t.delivery_min != null) tags += '<span class="tag">🛵 配送约 ' + esc(String(t.delivery_min)) + " 分钟</span>";
+    if (c.delivery_only) tags += '<span class="tag good">外卖店·无需步行</span>';
     if (t.walk_min != null) tags += '<span class="tag">🚶 步行 ' + esc(String(t.walk_min)) + " 分钟</span>";
     if (t.ride_min != null) tags += '<span class="tag">🚲 骑行 ' + esc(String(t.ride_min)) + " 分钟</span>";
     if (t.taxi_min != null) tags += '<span class="tag">🚕 打车 ' + esc(String(t.taxi_min)) + " 分钟</span>";
-    if (c.straight_distance_m != null) tags += '<span class="tag">直线 ' + esc(String(c.straight_distance_m)) + " 米</span>";
+    if (c.straight_distance_m != null) {
+      const dm = Number(c.straight_distance_m);
+      tags += '<span class="tag">直线 ' + esc(dm >= 1000 ? (dm / 1000).toFixed(1) + " 公里" : dm + " 米") + "</span>";
+    }
+    if (t["距离说明"]) tags += '<span class="tag bad">' + esc(String(t["距离说明"])) + "</span>";
     if (c.delivery === true) tags += '<span class="tag good">可外卖</span>';
     else if (c.delivery === false) tags += '<span class="tag">建议到店</span>';
     if (c.exceeds_walk_limit) tags += '<span class="tag bad">超步行上限·替代方案</span>';
@@ -443,10 +585,10 @@ function renderCards(cards, summary) {
       + (c.reason ? '<div class="card-text"><b>推荐：</b>' + esc(String(c.reason)) + "</div>" : "")
       + (c.warning ? '<div class="card-text"><b>避雷：</b>' + esc(String(c.warning)) + "</div>" : "")
       + (c.worth_it ? '<div class="card-text"><b>值不值：</b>' + esc(String(c.worth_it)) + "</div>" : "")
-      + (t["来源"] ? '<div class="route-fact">路线来源：' + esc(String(t["来源"])) + (t["查询时间"] ? " · " + esc(String(t["查询时间"])) : "") + "</div>" : '<div class="route-fact">路线：暂无法确认</div>')
+      + (t["来源"] ? '<div class="route-fact">' + (c.delivery_only ? "配送参考：" : "路线来源：") + esc(String(t["来源"])) + (t["查询时间"] ? " · " + esc(String(t["查询时间"])) : "") + "</div>" : (c.delivery_only ? '<div class="route-fact">配送时长：待确认</div>' : '<div class="route-fact">路线：暂无法确认</div>'))
       + '<div class="card-foot">'
       + (c.route_link
-        ? '<a class="map-link" target="_blank" rel="noopener" href="' + esc(String(c.route_link)) + '">🗺️ 官方路线（' + esc(String(c.origin || "校区")) + ' → 这家店）</a>'
+        ? '<a class="map-link" target="_blank" rel="noopener" href="' + esc(String(c.route_link)) + '">' + (c.delivery_only ? "🗺️ 地图位置（确认是哪家店）" : "🗺️ 官方路线（" + esc(String(c.origin || "校区")) + " → 这家店）") + "</a>"
         : '<span class="delivery-flag">暂无法生成路线链接</span>')
       + '<span class="delivery-flag">' + (c.delivery === true ? "懒得出门也能点" : (c.delivery === false ? "建议到店吃" : "外卖待确认")) + "</span></div>";
     wrap.appendChild(card);
@@ -637,6 +779,199 @@ QUICK_PROMPTS.forEach((q) => {
   chip.onclick = () => { input.value = q; send(); };
   chipsBox.appendChild(chip);
 });
+
+/* ---------- 知识库检索页（只读本地索引，不消耗大模型与地图额度） ---------- */
+const KB = { q: "", scene: "", price: "", walk: "", tag: "", sort: "relevance", loaded: false };
+const KB_CHIPS = [
+  { k: "scene", v: "", label: "全部" },
+  { k: "scene", v: "食堂窗口", label: "食堂窗口" },
+  { k: "scene", v: "周边堂食", label: "周边堂食" },
+  { k: "scene", v: "外卖", label: "外卖" },
+  { k: "price", v: "10", label: "≤ ¥10" },
+  { k: "price", v: "20", label: "≤ ¥20" },
+  { k: "walk", v: "10", label: "步行 ≤ 10 分" },
+  { k: "tag", v: "辣", label: "辣" },
+  { k: "tag", v: "清淡", label: "清淡" },
+  { k: "tag", v: "量大", label: "量大" },
+  { k: "tag", v: "适合聚餐", label: "适合聚餐" },
+  { k: "tag", v: "夜宵", label: "夜宵" }
+];
+
+function kbChipsRender() {
+  const box = document.getElementById("kb-filters");
+  box.innerHTML = "";
+  KB_CHIPS.forEach((c) => {
+    const btn = document.createElement("button");
+    btn.className = "kb-chip" + ((KB[c.k] || "") === c.v ? " on" : "");
+    btn.textContent = c.label;
+    btn.onclick = () => {
+      KB[c.k] = (KB[c.k] === c.v) ? "" : c.v;   // 同类条件互斥，再点取消
+      kbChipsRender();
+      kbFetch();
+    };
+    box.appendChild(btn);
+  });
+}
+
+function kbMetaRender(status, demo) {
+  const meta = document.getElementById("kb-meta");
+  const banner = document.getElementById("kb-banner");
+  const total = status || {};
+  meta.textContent = (total.门店数 != null)
+    ? "知识库 " + total.门店数 + " 家店 · " + total.评价数 + " 条评价 · " + (total.有评价门店数 || 0) + " 家有评价"
+    : "知识库加载中…";
+  if (demo) {
+    banner.innerHTML = '<div class="kb-banner">演示数据（data/examples）：用于界面与接口联调，不是真实门店。不设 KB_DEMO 环境变量时自动读取真实知识库。</div>';
+  } else if (total.评价数 === 0) {
+    banner.innerHTML = '<div class="kb-banner">真实评价库还是空的：按 data/kb/README.md 的字段入库，评分与评价才会出现在这里。</div>';
+  } else {
+    banner.innerHTML = "";
+  }
+}
+
+function kbScoreHtml(item) {
+  if (item.评分 == null) return '<span class="kb-count">暂无学生评价</span>';
+  const count = item.评分样本 || 0;
+  let countText;
+  if (count === 0) {
+    countText = item.评分来源 === "攻略整理" ? "攻略评分" : "暂无学生评价";
+  } else {
+    countText = item.样本不足 ? "样本 " + count + " 条（不足 3）" : count + " 条";
+  }
+  return '<span class="kb-rating">' + Number(item.评分).toFixed(1) + "</span>"
+    + '<span class="kb-count">' + countText + "</span>";
+}
+
+function kbCard(item) {
+  const card = document.createElement("div");
+  card.className = "kb-card";
+  const tags = [];
+  const shown = {};
+  if (item.人均 != null) tags.push('<span class="kb-tag">¥' + item.人均 + "</span>");
+  if (item.商圈) tags.push('<span class="kb-tag">' + esc(String(item.商圈)) + "</span>");
+  if (item.步行分钟 != null) tags.push('<span class="kb-tag">步行 ' + item.步行分钟 + " 分钟</span>");
+  (item.口味标签 || []).slice(0, 2).forEach((t) => {
+    const key = String(t);
+    if (shown[key]) return;
+    shown[key] = 1;
+    tags.push('<span class="kb-tag good">' + esc(key) + "</span>");
+  });
+  (item.差评要点 || []).forEach((t) => {
+    const key = String(t);
+    if (shown[key] || tags.length >= 5) return;
+    shown[key] = 1;
+    tags.push('<span class="kb-tag bad">' + esc(key) + "</span>");
+  });
+  const quote = item.摘录;
+  card.innerHTML =
+    '<div class="kb-row">'
+    + '<span class="kb-name">' + esc(item.名称 || "未命名") + "</span>"
+    + '<span class="kb-cat">' + esc((item.类别 || "") + (item.菜系 ? " · " + item.菜系 : "")) + "</span>"
+    + '<span class="kb-score">' + kbScoreHtml(item) + "</span></div>"
+    + '<div class="kb-tags">' + tags.join("") + "</div>"
+    + (quote
+      ? '<div class="kb-quote">' + esc(quote.片段)
+        + ' <span class="src">— ' + esc(quote.来源 || "学生评价") + (quote.日期 ? " · " + esc(quote.日期) : "") + "</span></div>"
+      : "");
+  card.onclick = () => kbOpen(item.名称);
+  return card;
+}
+
+async function kbFetch() {
+  const box = document.getElementById("kb-results");
+  box.innerHTML = '<div class="kb-empty">检索中…</div>';
+  const params = new URLSearchParams();
+  if (KB.q) params.set("q", KB.q);
+  if (KB.scene) params.set("scene", KB.scene);
+  if (KB.price) params.set("max_price", KB.price);
+  if (KB.walk) params.set("max_walk", KB.walk);
+  if (KB.tag) params.set("tag", KB.tag);
+  if (KB.sort) params.set("sort", KB.sort);
+  try {
+    const res = await fetch(api("/api/kb/search?" + params.toString()), { cache: "no-store" });
+    const data = await res.json();
+    kbMetaRender(data.status, data.demo);
+    box.innerHTML = "";
+    if (!data.items || !data.items.length) {
+      box.innerHTML = '<div class="kb-empty">没有匹配的结果。<br>试试放宽价格或步行条件，或者换个说法（「粥」「糖水」「宵夜」）。</div>';
+      return;
+    }
+    data.items.forEach((item) => box.appendChild(kbCard(item)));
+  } catch (err) {
+    box.innerHTML = '<div class="kb-empty">检索失败，请稍后重试</div>';
+  }
+}
+
+async function kbOpen(name) {
+  const body = document.getElementById("kb-detail");
+  document.getElementById("kb-detail-title").textContent = name;
+  body.innerHTML = '<div class="kb-empty">加载中…</div>';
+  document.getElementById("kb-mask").classList.add("show");
+  try {
+    const res = await fetch(api("/api/kb/store?name=" + encodeURIComponent(name)), { cache: "no-store" });
+    if (!res.ok) {
+      body.innerHTML = '<div class="kb-empty">知识库里没有这家店的详情</div>';
+      return;
+    }
+    const data = await res.json();
+    const s = data.store || {};
+    const dist = s.分布 || {};
+    const total = s.样本 || 0;
+    const distHtml = ["5", "4", "3", "2", "1"].map((star) => {
+      const n = dist[star] || 0;
+      const width = total ? Math.round((n / total) * 100) : 0;
+      return '<div class="kb-dist-row"><span>' + star + ' 星</span><span class="kb-bar"><i style="width:' + width + '%"></i></span><span>' + n + "</span></div>";
+    }).join("");
+    const reviews = (s.评价 || []).map((r) =>
+      '<div class="kb-review">' + esc(r.片段)
+      + '<div class="meta">' + (r.评分 != null ? r.评分 + " 分 · " : "") + esc(r.来源 || "学生评价")
+      + (r.日期 ? " · " + esc(r.日期) : "") + (r.餐段 ? " · " + esc(r.餐段) : "") + "</div></div>"
+    ).join("");
+    body.innerHTML =
+      '<div class="kb-meta">' + esc((s.类别 || "") + (s.菜系 ? " · " + s.菜系 : ""))
+      + (s.人均 != null ? " · 人均 ¥" + s.人均 : "")
+      + (s.步行分钟 != null ? " · 步行 " + s.步行分钟 + " 分钟" : "") + "</div>"
+      + (s.地址 ? '<div class="kb-meta">' + esc(s.地址) + "</div>"
+        : (s.商圈 ? '<div class="kb-meta">' + esc(s.商圈) + "（攻略未给具体位置）</div>" : ""))
+      + '<div class="kb-dist"><div class="kb-meta">评分 ' + (s.评分 != null ? Number(s.评分).toFixed(1) : "—")
+      + (total > 0 ? " · " + total + " 条评价"
+        : (s.评分来源 === "攻略整理" ? " · 攻略评分（尚无学生评价）" : " · 暂无学生评价"))
+      + "</div>" + distHtml + "</div>"
+      + (reviews || '<div class="kb-empty">还没有同学提交评价</div>');
+  } catch (err) {
+    body.innerHTML = '<div class="kb-empty">加载失败</div>';
+  }
+}
+document.getElementById("kb-mask").onclick = (e) => { if (e.target.id === "kb-mask") e.target.classList.remove("show"); };
+
+function switchView(view) {
+  document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+  document.getElementById("view-chat").classList.toggle("active", view === "chat");
+  document.getElementById("view-kb").classList.toggle("active", view === "kb");
+  /* 视图写进 hash：检索页可以直接分享链接 #kb */
+  if (view === "kb" && location.hash !== "#kb") history.replaceState(null, "", "#kb");
+  if (view === "chat" && location.hash === "#kb") history.replaceState(null, "", location.pathname + location.search);
+  if (view === "kb" && !KB.loaded) {
+    KB.loaded = true;
+    kbChipsRender();
+    kbFetch();
+  }
+}
+document.querySelectorAll(".tab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
+document.getElementById("kb-go").onclick = () => {
+  KB.q = document.getElementById("kb-q").value.trim();
+  kbFetch();
+};
+document.getElementById("kb-q").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    KB.q = e.target.value.trim();
+    kbFetch();
+  }
+});
+fetch(api("/api/kb/status")).then((r) => r.json()).then((d) => kbMetaRender(d, d.demo)).catch(() => {});
+
+/* 直接访问 #kb 进来时默认打开检索页 */
+if (location.hash === "#kb") switchView("kb");
 
 addWelcome();
 input.focus();

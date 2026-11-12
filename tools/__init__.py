@@ -86,7 +86,11 @@ def build_registry(
 ) -> Tuple[Registry, List[Dict[str, Any]]]:
     store = poi_store if poi_store is not None else {}
     functions: Registry = {
-        "food_search": _adapt(food_search),
+        "food_search": _adapt(
+            lambda query, taste="", budget_max=None, max_minutes=None: food_search(
+                query, taste=taste, budget_max=budget_max, max_minutes=max_minutes, poi_store=store
+            )
+        ),
         "plan_route": _adapt(plan_route),
         "find_restaurant": _adapt(lambda name: find_restaurant(name, poi_store=store)),
         "search_poi": _adapt(lambda keyword: search_poi(keyword, poi_store=store)),
@@ -103,9 +107,12 @@ def build_registry(
             "function": {
                 "name": "food_search",
                 "description": (
-                    "本地真实知识库检索（问卷/点评人工整理，含学生评分与招牌菜）。"
-                    "用户问『附近吃什么 / 推荐餐厅』时先查本地库；知识库为空会明确提示，"
-                    "此时改用 search_poi 联网检索，禁止编造门店。"
+                    "美食检索（先本地、后联网）：优先查本地知识库（问卷/点评人工整理，"
+                    "含学生评分/招牌菜/避雷）；本地无匹配时【自动】联网检索百度地图 "
+                    "3 公里内真实门店（带 uid/地址/坐标，自动剔除停车场等附属设施）。"
+                    "用户问『附近吃什么/推荐餐厅/想吃X』时用这个工具即可，"
+                    "它已经内置联网兜底——【不需要】再单独调 search_poi，"
+                    "除非返回明确提示联网失败或需要换品类词重查。禁止编造门店。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -253,9 +260,10 @@ def build_registry(
                 "name": "format_recommendation",
                 "description": (
                     "推荐卡片生成器：确定最终推荐后、输出最终回答之前调用。"
-                    "每家店必须传 uid（来自 search_poi 或 find_restaurant）并已用 verify_route 核实过路线；"
-                    "名称、地址、坐标、耗时、距离、路线链接由后端注入，你只填解释性字段和预估人均。"
-                    "后端会做硬校验：非餐饮门店、未核实路线、超出范围的条目会被剔除，"
+                    "每家店必须传 uid（来自 search_poi / find_restaurant 或 food_search 知识库结果）；"
+                    "堂食门店要先用 verify_route 核实路线，外卖店（类别=外卖）有坐标即可，不需要 verify_route。"
+                    "名称、地址、坐标、耗时、距离、路线/地图链接由后端注入，你只填解释性字段和预估人均。"
+                    "后端会做硬校验：非餐饮门店、未核实路线的堂食店、超出范围的条目会被剔除，"
                     "人均/评分/营业时间没有来源时前端显示『待确认』——不要编造。"
                     "没有合适的店就别调用本工具，直接如实告诉用户没有匹配。"
                 ),

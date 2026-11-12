@@ -72,6 +72,7 @@ LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/chat/completions
 BAIDU_MAP_AK=你的AK
 CAMPUS_LOCATION=23.017973,113.411971
 ORIGIN_KEY=dorm                 # 默认出发点：dorm / south_gate / north_gate / southwest_gate / northwest_gate
+# 需要向百度申请哪些接口/配额，见 docs/地图接入说明.md（可直接转给百度同学）
 
 # 地图治理（默认值已按"个人开发者额度留余量"设好）
 MAP_QPS=2                       # 全局 QPS（官方 3，留 1 余量）
@@ -215,7 +216,47 @@ python tests/test_map_gateway.py      # 13 项：限流提示、配额熔断、�
 - [x] 卡片硬校验、未知字段待确认、官方导航链接
 - [x] 5 个实测出发点、页面可切换
 - [x] 接口限流与工具预算、build 指纹校验
-- [ ] **真实门店库 20–50 家**（当前空库，推荐全靠实时检索，缺学生评分）
+- [x] **真实门店库 57 家**（周边 2–3km 10 家 + 5 个商圈 47 家，两篇攻略人工整理）+ 58 条评价
+- [ ] 问卷实测评价补到每店 ≥3 条（当前每店 1 条，属单人观点，页面标「样本不足 3」）
+- [ ] 坐标补录（AK 到手后跑 `tools/enrich_coords.py`，一次性约 60–120 次检索）
 - [ ] 天气感知（雨天推外卖/近店）
 - [ ] 定时推送（工作日 11:00 / 17:00）
 - [ ] 可选：高德做第二来源核对、RapidFuzz 提升别名匹配、Tavily 搜公开网页线索
+
+---
+
+## 10. 知识库检索页（RAG 骨架）
+
+页面顶部新增「AI 推荐 / 浏览检索」两个视图。检索页不调用大模型、不调用地图接口，
+只读本地索引，因此**不消耗任何额度，断网也能演示**；直接访问 `/#kb` 可进入。
+
+### 10.1 实现分层
+
+| 文件 | 职责 |
+|---|---|
+| `tools/kb_index.py` | 检索内核：中文单字+二字 bigram 分词、同义词扩展、BM25 打分（纯标准库）|
+| `tools/kb_search.py` | 门店检索、评价证据、口碑统计、详情聚合、演示/真实语料切换 |
+| `web/server.py` | 三个只读接口 `/api/kb/status` `/api/kb/search` `/api/kb/store` |
+| `web/static/index.html` | 视图切换 + 检索页 + 店铺详情弹窗 |
+| `data/kb/reviews.jsonl` | 真实评价语料 58 条（两家攻略整理，字段见 `data/kb/README.md`）|
+| `tests/test_kb.py` | 49 项：召回、过滤、统计一致性、来源标注、孤儿评价、演示隔离 |
+
+### 10.2 两条铁律
+
+1. **评分与评价只由后端统计**：均值、样本数、分布、摘录全部由 `kb_search` 算出，
+   带来源与日期；模型与前端都不允许自己编数字。样本少于 `KB_MIN_SAMPLES`（默认 3）
+   时标记「样本不足」，只报条数。
+2. **演示数据与真实数据物理隔离**：`KB_DEMO=1` 才读 `data/examples/demo_*.json`，
+   接口返回 `demo=true`，页面顶部挂横幅；正式模式只读 `data/`，空库如实返回 0 条。
+
+### 10.3 跑法
+
+```bash
+# 界面联调（演示语料）
+KB_DEMO=1 python web/server.py     # Windows: set KB_DEMO=1 && python web/server.py
+# 打开 http://localhost:8787/#kb
+
+# 只看检索层
+python tests/test_kb.py
+```
+
