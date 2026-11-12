@@ -52,32 +52,58 @@ python web/server.py       # 网页版 → http://localhost:8787
 python main.py             # 配好 .env 后的交互模式（/profile 看画像，/quit 退出）
 ```
 
-要开大模型：复制 `.env.example` 为 `.env` 填 Key（见第 3 节）。
+要开大模型需要密钥，四步（详见第 3 节）：
+
+```bash
+cp .env.example .env      # 1. 复制模板（.env 不进 git，只存在你本机）
+# 2. 编辑 .env：填 OPENAI_API_KEYS / BAIDU_MAP_AKS（值见下节）
+python web/server.py      # 3. 启动 → http://localhost:8787
+curl localhost:8787/api/status   # 4. 验证：llm=true、map=true、llm_pool.keys=你的Key数
+```
 
 ---
 
 ## 3. 配置项
 
 ```ini
-# 模型：二选一
+# ===== 模型 =====
 LLM_PROVIDER=openai
-OPENAI_API_KEY=你的智谱Key
 LLM_MODEL=glm-4-flash
 LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/chat/completions
+
+# 单 Key 写法（兼容，池子等价于 1 把钥匙 / 2 路并发）
+OPENAI_API_KEY=你的智谱Key
+# 多 Key 写法（推荐，容量线性翻倍）：逗号分隔，不能有空格和引号
+# OPENAI_API_KEYS=key1,key2,key3,key4
+# 两者同时存在时以 OPENAI_API_KEYS 为准
+
 # 或 DeepSeek（付费）
 # LLM_PROVIDER=deepseek
 # DEEPSEEK_API_KEY=...
+# DEEPSEEK_API_KEYS=key1,key2
 
-# 地图
+# ===== LLM Key 池与并发治理（默认值即为 glm-4-flash 免费档的安全值）=====
+LLM_CONCURRENCY_PER_KEY=2       # 每把 Key 同时放行的请求数（免费档官方限制 2，别调大）
+LLM_QUEUE_WAIT=10               # 抢不到名额时的排队上限（秒），超时回"稍后再试"
+LLM_BREAKER_COOLDOWN=600        # 某把 Key 被 429/1214 限流后熔断多久再试（秒）
+LLM_CONTEXT_CHAR_LIMIT=14000    # 单次请求字符预算，超限主动裁剪（防触发 8K token 限速档）
+TOOL_RESULT_MAX_CHARS=600       # 裁剪时单条工具结果保留的字数
+
+# ===== 地图 =====
+# 单 AK 写法（兼容，池子等价于 1 把钥匙）
 BAIDU_MAP_AK=你的AK
+# 多 AK 写法（推荐）：逗号分隔，每把 AK 独立日配额/独立限速/独立熔断
+# BAIDU_MAP_AKS=ak1,ak2,ak3,ak4
+# 两者同时存在时以 BAIDU_MAP_AKS 为准
+
 CAMPUS_LOCATION=23.017973,113.411971
 ORIGIN_KEY=dorm                 # 默认出发点：dorm / south_gate / north_gate / southwest_gate / northwest_gate
 # 需要向百度申请哪些接口/配额，见 docs/地图接入说明.md（可直接转给百度同学）
 
-# 地图治理（默认值已按"个人开发者额度留余量"设好）
-MAP_QPS=2                       # 全局 QPS（官方 3，留 1 余量）
-MAP_DAILY_SEARCH=80             # 地点检索日上限（官方 100）
-MAP_DAILY_ROUTE=4000            # 路线日上限（官方 5000）
+# 地图治理（默认值已按"个人开发者额度留余量"设好；日配额为每把 AK 的额度）
+MAP_QPS=2                       # 每 AK 全局限速（官方 3，留 1 余量）
+MAP_DAILY_SEARCH=80             # 每把 AK 的地点检索日上限（官方 100）
+MAP_DAILY_ROUTE=4000            # 每把 AK 的路线日上限（官方 5000）
 MAP_TIMEOUT=8                   # 单次请求超时（秒）
 MAP_MAX_WAIT=4                  # 排队等令牌上限，超时直接降级提示
 MAP_RETRY=1                     # 限流/超时的重试次数（配额/权限异常不重试）
@@ -95,8 +121,34 @@ MAX_TOOL_CALLS_PER_TURN=10      # 单轮工具调用预算
 # USE_PLATFORM_ENV=1
 ```
 
-- 智谱 Key：`open.bigmodel.cn` 注册；百度 AK：`lbsyun.baidu.com` 创建**服务端**类型应用（不勾 SN）。
-- `.env` / `runtime.env` 只放服务端，永不进前端、日志、分享包。
+**怎么填（照做即可）**
+
+1. `cp .env.example .env`——`.env` 只在你本机存在，git 不跟踪，不进任何 PR。
+2. LLM：把 `OPENAI_API_KEYS=` 这行的 `#` 去掉，填真实 Key；只有 1 把就填 `OPENAI_API_KEYS=那一把`（与单 Key 写法等价）。
+3. 地图：把 `BAIDU_MAP_AKS=` 这行的 `#` 去掉，填真实 AK，同样逗号分隔。
+4. 其余参数**保持默认**。`LLM_CONCURRENCY_PER_KEY=2` 是免费档硬限制，调大会换来 429。
+5. 验证：启动后访问 `/api/status`，确认 `llm`、`map` 均为 `true`，`llm_pool.keys` 等于你填的 Key 数量，`map_stats.ak_usage` 里 AK 数量对得上。
+
+**密钥从哪来**
+
+- 智谱 Key：`open.bigmodel.cn` 注册 → 控制台创建 API Key（`glm-4-flash` 免费）。
+- 百度 AK：`lbsyun.baidu.com` 创建**服务端**类型应用，**不勾 SN 校验**，白名单可留空。
+
+**安全纪律**
+
+- `.env` / `runtime.env` 只放服务端，永不进前端、日志、分享包、截图、PPT。
+- 不要 `git add -f .env`（`.gitignore` 已拦截，强制添加会泄露）。
+- 云端部署的密钥走 `runtime.env`（随部署包上传）或平台环境变量注入（开 `USE_PLATFORM_ENV=1`），**不是**本地这份 `.env`。
+
+**排错**
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `/api/status` 里 `llm=false` | `.env` 未创建 / 变量名拼错 / 值仍是占位符「在此填入」 | 检查文件名是 `.env` 不是 `.env.txt`；占位符会被识别为未配置 |
+| 一直返回"当前提问的人较多" | 所有 Key 都在熔断中或排队超时 | 看 `/api/status` 的 `llm_pool`，多数是 Key 无效或并发被占满 |
+| 地图卡片全被剔除 | AK 配额用尽或类型不对（非服务端应用） | 看 `map_stats.ak_usage` 的熔断标记，换 AK 或改应用类型 |
+| 改了 `.env` 但不生效 | 进程已有同名环境变量时 `.env` 不会覆盖（`load_dotenv(override=False)`），或改完没重启 | 重启服务；Windows 下确认文件名是 `.env` 而非 `.env.txt` |
+| 行尾注释导致启动报 `ValueError` | 旧版解析器不剥行尾 `#` | 已修复并有回归测试 `tests/test_config_env.py`；模板可放心带注释 |
 
 ---
 
@@ -166,6 +218,28 @@ QPS 需要外部共享存储（Redis）才能严格全局，日配额已通过�
 消息长度 ≤400 字、每会话 8 次/分钟、全站 300 次/日、单轮工具调用 ≤10 次；
 超限返回 429/413 并在页面友好提示。密钥只在服务端，状态接口只暴露统计不暴露凭据。
 
+### 4.8 出口资源池化：LLM Key 池（`llm/keypool.py`）与地图 AK 池
+
+LLM 与地图是两类"会烧额度、会被限流"的出口资源，统一按「池化」治理
+（对照 `map_gateway` 的思路，二者机制同构）：
+
+| 能力 | LLM Key 池 | 地图 AK 池 |
+|---|---|---|
+| 池化 | `OPENAI_API_KEYS=k1,k2,k3,k4`（兼容旧单 Key 变量） | `BAIDU_MAP_AKS=ak1,ak2,ak3,ak4` |
+| 并发上限 | 每 Key 信号量 2 路（glm-4-flash 免费档限制） | 每 AK 令牌桶 2 QPS |
+| 调度 | 最闲优先 + 轮询摊匀，FIFO 排队 | 同左 |
+| 排队超时 | `LLM_QUEUE_WAIT=10` 秒 → LLMBusy → 前端"稍后再试" | `MAP_MAX_WAIT=4` 秒 → 降级提示 |
+| 熔断 | 429/1214/并发超限 → 该 Key 熔断 10 分钟，换钥匙重试，用户无感 | 配额/权限异常 → 该 AK 熔断 10 分钟，换 AK 重试 |
+| 上下文纪律 | 每次请求前按字符预算（`LLM_CONTEXT_CHAR_LIMIT=14000`）主动裁剪：先截断工具结果 → 再压缩历史，坚决不进智谱 8K token 限速档 | — |
+| 统计 | `/api/status` 的 `llm_pool`（Key 数、在途、今日用量，密钥打码） | `map_stats` 的 `ak_usage`（每 AK 用量与熔断状态） |
+
+容量账（4 Key / 4 AK 配置下）：LLM 并发 8 路 ≈ 每分钟 ~48 人次提问吞吐；
+地图检索 320 次/日、路线 16000 次/日、QPS 8。
+
+**已知限制**：两个池的状态均为进程内实现（LLM 池纯内存，地图日计数落盘）；
+单容器单进程成立。若平台扩多实例，LLM 池需换外部共享存储（如 Redis），
+日配额文件计数为跨进程近似共享。
+
 ---
 
 ## 5. 真实数据怎么入库
@@ -186,6 +260,8 @@ python tests/test_protocol.py         # 3 部分：协议裁剪/自愈、ReAct �
 python tests/test_poi_consistency.py  # 10 项：范围/同名分店/失败不编造/事实注入/链接格式
 python tests/test_map_gateway.py      # 13 项：限流提示、配额熔断、缓存、并发合并、只查步行、
                                       #        附属POI拒绝、指定店不替换、卡片硬校验、密钥卫生
+python tests/test_concurrency.py      # 8 项：LLM Key 池排队/分流/熔断/故障转移、20 路并发
+                                      #        防雪崩、上下文预算、地图 AK 池故障转移/独立配额/负载均衡
 ```
 
 全部用 mock 网络，不消耗真实额度；发布前必须全绿。
@@ -217,6 +293,7 @@ python tests/test_map_gateway.py      # 13 项：限流提示、配额熔断、�
 - [x] 5 个实测出发点、页面可切换
 - [x] 接口限流与工具预算、build 指纹校验
 - [x] **真实门店库 57 家**（周边 2–3km 10 家 + 5 个商圈 47 家，两篇攻略人工整理）+ 58 条评价
+- [x] 出口资源池化：LLM Key 池（排队/分流/熔断）+ 地图 AK 池 + 上下文预算（防 8K 限速）
 - [ ] 问卷实测评价补到每店 ≥3 条（当前每店 1 条，属单人观点，页面标「样本不足 3」）
 - [ ] 坐标补录（AK 到手后跑 `tools/enrich_coords.py`，一次性约 60–120 次检索）
 - [ ] 天气感知（雨天推外卖/近店）

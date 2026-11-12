@@ -22,6 +22,7 @@ from typing import Any, Dict, List
 import config
 from agent.memory import ConversationMemory, UserProfile
 from llm.client import AssistantMessage, LLMClient, ToolCall
+from llm.keypool import LLMBusy
 from tools import build_registry
 from tools.route_planner import build_place_link, build_route_link, current_origin, set_origin
 from tools import map_gateway
@@ -158,6 +159,13 @@ class FoodAdvisorAgent:
                 reply = self._filter_cards_by_walk_limit(reply, user_input)
                 reply = self._guard_text_walk_limit(reply, user_input)
                 return self._guard_walking_constraint(reply, user_input)
+            except LLMBusy:
+                # 排队超时 ≠ 服务坏了：给用户明确预期，绝不能降级到离线模式
+                self._trace_fn("模型通道排队超时，返回稍后再试提示")
+                return (
+                    "现在提问的同学有点多，模型通道都占满了。请等 10 秒左右再发一次，"
+                    "你的问题我还记着呢。"
+                )
             except RuntimeError as exc:
                 self._trace_fn(f"LLM 异常，切换离线模式: {exc}")
         return self._offline_fallback(user_input)
@@ -393,20 +401,59 @@ class FoodAdvisorAgent:
 
     # ---------- LLM 模式：完整 ReAct 循环 ----------
     def _chat(self):
-        """调用 LLM；遇到 400（上下文过长/格式被拒）时压缩历史重试一次。
+        """调用 LLM；带两道防线：
 
-        免费档小模型偶发返回 1214「messages 参数非法」，多数是上下文里
-        工具结果堆太多。压缩到最近 8 条再试，比直接掉到离线模式体验好得多。
+        1. 上下文预算（主动）：messages + tools 的 JSON 字符数超过
+           LLM_CONTEXT_CHAR_LIMIT 时主动裁剪——先截断过长的工具结果，
+           仍超限则压缩到最近 8 条。 glm-4-flash 免费档上下文超 8K token
+           后速率被限制为极低档，被动等 400 再压缩为时已晚（请求已经在
+           限速档里排队了），所以必须在发请求前主动收缩。
+        2. 400 重试（被动）：上下文仍被拒时压缩历史重试一次（历史逻辑保留）。
         """
+        messages = self.memory.as_payload()
+        if self._payload_over_budget(messages):
+            self._trace_fn("上下文超过预算，主动裁剪（防 8K 限速档）")
+            messages = self._shrink(messages)
         try:
-            return self.llm.chat(self.memory.as_payload(), tools=self.schemas)
+            return self.llm.chat(messages, tools=self.schemas)
         except RuntimeError as exc:
             if "400" not in str(exc):
                 raise
             self._trace_fn("LLM 拒绝了当前上下文（400），压缩历史后重试一次")
-            messages = self.memory.messages
             compact = [messages[0]] + ConversationMemory._sanitize(messages[-8:])
             return self.llm.chat(compact, tools=self.schemas)
+
+    @staticmethod
+    def _payload_chars(messages, tools=None) -> int:
+        try:
+            total = len(json.dumps(messages, ensure_ascii=False))
+            if tools:
+                total += len(json.dumps(tools, ensure_ascii=False))
+            return total
+        except (TypeError, ValueError):
+            return 0
+
+    def _payload_over_budget(self, messages) -> bool:
+        return self._payload_chars(messages, self.schemas) > config.LLM_CONTEXT_CHAR_LIMIT
+
+    def _shrink(self, messages):
+        """两级裁剪：先截断工具结果 → 仍超限再压缩历史到最近 8 条。"""
+        budget = config.LLM_CONTEXT_CHAR_LIMIT
+        shrunk = self._truncate_tool_results(messages)
+        if self._payload_chars(shrunk, self.schemas) <= budget:
+            return shrunk
+        compact = [shrunk[0]] + ConversationMemory._sanitize(shrunk[-8:])
+        return compact
+
+    @staticmethod
+    def _truncate_tool_results(messages):
+        limit = config.TOOL_RESULT_MAX_CHARS
+        out = []
+        for m in messages:
+            if m.get("role") == "tool" and len(m.get("content") or "") > limit:
+                m = dict(m, content=m["content"][:limit] + "…（工具结果过长已截断；结论性字段已在前文）")
+            out.append(m)
+        return out
 
     def _react_loop(self, user_input: str = "") -> str:
         tool_calls_used = 0

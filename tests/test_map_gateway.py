@@ -35,6 +35,22 @@ def ok(label: str) -> None:
     print(f"[通过] {label}")
 
 
+_USAGE_BAK = ""
+
+
+def _isolate_usage_file():
+    """把地图计数文件指到临时路径，测试不污染 data/map_usage.json。"""
+    import tempfile
+    global _USAGE_BAK
+    _USAGE_BAK = getattr(config, "MAP_USAGE_PATH", "")
+    config.MAP_USAGE_PATH = os.path.join(tempfile.mkdtemp(prefix="junshi_usage_"), "map_usage.json")
+
+
+def _restore_usage_file():
+    if _USAGE_BAK is not None:
+        config.MAP_USAGE_PATH = _USAGE_BAK
+
+
 class FakeTransport:
     """可编排的假百度：记录调用、按脚本返回 MapResult。"""
 
@@ -45,15 +61,17 @@ class FakeTransport:
 
     def __enter__(self):
         self.original = gw._do_http
-        def wrapper(path, params):
+        def wrapper(path, params, ak=None):
             self.calls.append((path, dict(params)))
             return self.handler(path, params)
         gw._do_http = wrapper
+        _isolate_usage_file()
         gw.reset_for_tests()
         return self
 
     def __exit__(self, *exc):
         gw._do_http = self.original
+        _restore_usage_file()
         gw.reset_for_tests()
 
 
