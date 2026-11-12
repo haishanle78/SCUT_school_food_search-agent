@@ -152,7 +152,8 @@ def test_exception_safe() -> None:
 
 def test_delivery_scene_isolation() -> None:
     print("[6] 场景互斥：堂食检索不混入外卖店")
-    dine_in = run("辣", taste="辣", max_minutes=15)
+    # 用知识库确定存在的品类，避免依赖联网可用性（干净环境无 AK 时也能稳定断言）
+    dine_in = run("粥")
     cats = {i.get("类别") for i in dine_in.get("结果", [])}
     check("堂食检索结果里没有外卖条目", "外卖" not in cats, str(cats))
     check("堂食检索仍有结果", bool(dine_in.get("结果")), str(dine_in)[:100])
