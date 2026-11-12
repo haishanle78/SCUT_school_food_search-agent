@@ -1,11 +1,13 @@
-"""按店名补门店坐标：调用百度 place/v2/search 检索，把坐标/地址写回 data/restaurants.json。
+"""按店名补门店坐标：调用百度 place/v2/search 检索，把坐标/地址写回数据文件。
 
 只用于数据维护，不参与线上问答链路。
 
 用法：
-    python tools/enrich_coords.py --dry-run     # 只查询、打印结果，不写盘
-    python tools/enrich_coords.py               # 查询并写盘（会先备份原文件）
-    python tools/enrich_coords.py --only 潮埕    # 只补指定门店
+    python tools/enrich_coords.py --dry-run              # 只查询、打印结果，不写盘
+    python tools/enrich_coords.py                        # 补周边餐厅（默认）
+    python tools/enrich_coords.py --target delivery      # 补外卖店
+    python tools/enrich_coords.py --target all           # 三类都补
+    python tools/enrich_coords.py --only 潮埕             # 只补指定门店
 
 设计要点：
 - 命中判定从严：候选名称必须包含门店核心名（括号、空格全部归一后再比）；
@@ -13,7 +15,7 @@
   距离上限放宽到 12km（番禺各商圈直线 6–11km，属正常；珠江新城/天河区 15km+ 仍会被拒）；
 - 无后缀门店（周边 2–3km 那批）：沿用 6km 上限。
 - 走 map_gateway，自动享受限速、缓存、日配额与错误分类。
-- 写盘前备份为 data/restaurants.json.bak。
+- 写盘前备份为 <原文件>.bak。
 """
 
 from __future__ import annotations
@@ -34,17 +36,41 @@ from tools import route_planner as rp
 CAMPUS_ACCEPT_M = 6000     # 无分店后缀门店：离校区直线距离上限
 BRANCH_ACCEPT_M = 12000    # 带分店后缀门店：离校区直线距离上限（番禺/琶洲各商圈 6–11km）
 
+# 目标库：路径 / 集合字段 / 名称字段候选 / 距离上限 / 检索地名提示
+TARGETS = {
+    "restaurants": {
+        "path": config.RESTAURANTS_PATH, "key": "restaurants",
+        "fields": ("名称",), "accept_m": 0, "hint": "",
+    },
+    "delivery": {
+        "path": config.DELIVERY_PATH, "key": "店铺",
+        "fields": ("店名", "名称"), "accept_m": 12500, "hint": "南村",
+    },
+    "canteen": {
+        "path": config.CANTEEN_PATH, "key": "窗口",
+        "fields": ("窗口名", "名称"), "accept_m": 0, "hint": "",
+    },
+}
 
-def _load() -> dict:
-    with open(config.RESTAURANTS_PATH, "r", encoding="utf-8") as handle:
+
+def _load(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
-def _save(payload: dict) -> None:
-    shutil.copyfile(config.RESTAURANTS_PATH, config.RESTAURANTS_PATH + ".bak")
-    with open(config.RESTAURANTS_PATH, "w", encoding="utf-8") as handle:
+def _save(path: str, payload: dict) -> None:
+    shutil.copyfile(path, path + ".bak")
+    with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+
+
+def _store_name(store: dict, fields) -> str:
+    for field in fields:
+        value = str(store.get(field) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _clean(s: str) -> str:
@@ -60,8 +86,12 @@ def _split_name(name: str):
     return str(name).strip(), ""
 
 
-def _candidates(name: str) -> list:
-    """检索词尝试顺序：核心名+分店后缀 → 全名 → 纯中文名。"""
+def _candidates(name: str, hint: str = "") -> list:
+    """检索词尝试顺序：核心名+分店后缀 → 全名 → 纯中文名 → 核心名+地名提示。
+
+    hint 用于外卖这类「店名可能是群内叫法」的场景：加一个「南村」这类地名，
+    能让地图把同名但不同镇的分店排到前面。
+    """
     core, suffix = _split_name(name)
     tries = []
     if suffix:
@@ -70,6 +100,8 @@ def _candidates(name: str) -> list:
     stripped = "".join(ch for ch in name if "\u4e00" <= ch <= "\u9fff")
     if stripped and stripped not in tries:
         tries.append(stripped)
+    if hint:
+        tries.append(f"{core} {hint}")
     for keyword in tries:
         raw = rp._query(keyword, None)
         if rp._search_status() != gw.OK:
@@ -83,7 +115,7 @@ def _candidates(name: str) -> list:
 FACILITY_PAT = re.compile(r"停车场|接送点|充电|加油|有限公司|分公司|集团公司|仓库")
 
 
-def _pick(name: str, items: list):
+def _pick(name: str, items: list, accept_m: int = 0):
     """从严挑一个候选：名称归一后必须包含核心名；同分店后缀者优先；再取最近。
 
     过滤规则（都是真踩过的坑）：
@@ -91,10 +123,11 @@ def _pick(name: str, items: list):
     - 明确非餐饮的 POI 不收（is_dining 为 False）；
     - 带分店后缀的门店：候选名里没有该后缀时，只接受 8km 内的（防「山姆的牛
       琶洲保利店」错配到 10km 外的哈街总店这种跨商圈错配）。
+    accept_m > 0 时用它覆盖默认上限（外卖可送更远，用 12km）。
     """
     core, suffix = _split_name(name)
     core_c, suffix_c = _clean(core), _clean(suffix)
-    accept_m = BRANCH_ACCEPT_M if suffix else CAMPUS_ACCEPT_M
+    accept_m = accept_m or (BRANCH_ACCEPT_M if suffix else CAMPUS_ACCEPT_M)
 
     matched = []
     for item in items:
@@ -127,37 +160,38 @@ def _pick(name: str, items: list):
     return best, ("完全同名" if exact else ("名称包含" if not suffix_c or suffix_c in _clean(best.get("名称")) else "核心名命中")), accept_m
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="补门店坐标")
-    parser.add_argument("--dry-run", action="store_true", help="只打印不写盘")
-    parser.add_argument("--only", default="", help="只处理名称包含该关键词的门店")
-    args = parser.parse_args()
+def _enrich_one(target: str, dry_run: bool, only: list) -> tuple:
+    """补一个数据文件，返回 (写入, 留空, 失败) 明细。
 
-    if not config.MAP_ENABLED:
-        print("未配置百度地图 AK：请在 .env 里填写 BAIDU_MAP_AK 后重试。")
-        return 2
-
-    payload = _load()
-    stores = payload.get("restaurants") or []
+    only：只处理名称命中这些关键词的条目（空列表表示全库）。
+    传了 only 时不跳过已有坐标的条目（便于强制重查某几家）。
+    """
+    spec = TARGETS[target]
+    path, key, name_fields = spec["path"], spec["key"], spec["fields"]
+    accept_m, hint = spec["accept_m"], spec["hint"]
+    payload = _load(path)
+    stores = payload.get(key) or []
     if not stores:
-        print("门店库为空，先填 data/restaurants.json")
-        return 1
+        print(f"\n[{target}] 库为空，跳过")
+        return [], [], []
 
+    only_kw = [k for k in (only or []) if k]
+    print(f"\n[{target}] {path}（{len(stores)} 条）")
     filled, skipped, failed = [], [], []
     for store in stores:
-        name = str(store.get("名称") or "").strip()
-        if not name or (args.only and args.only not in name):
+        name = _store_name(store, name_fields)
+        if not name or (only_kw and not any(k in name for k in only_kw)):
             continue
-        if store.get("坐标") and not args.only:
+        if store.get("坐标") and not only_kw:
             print(f"  跳过 {name}：已有坐标 {store['坐标']}")
             continue
 
-        items, status = _candidates(name)
+        items, status = _candidates(name, hint=hint)
         if status != gw.OK:
             failed.append((name, status))
             print(f"  [失败] {name}：地图返回 {status}")
             continue
-        best, why, _accept = _pick(name, items)
+        best, why, _accept = _pick(name, items, accept_m=accept_m)
         if best is None:
             skipped.append((name, why))
             print(f"  [留空] {name}：{why}")
@@ -172,15 +206,42 @@ def main() -> int:
         filled.append((name, best["名称"], best["坐标"], best.get("直线距离_米")))
         print(f"  [写入] {name} → {best['名称']} | {best['坐标']} | 直线 {best.get('直线距离_米')} 米（{why}）")
 
-    snapshot = gw.snapshot()
-    print(f"\n合计：写入 {len(filled)} 家，留空 {len(skipped)} 家，失败 {len(failed)} 家")
-    print(f"地图额度：今日检索 {snapshot.get('daily_search')}/{snapshot.get('daily_search_limit')}，缓存命中 {snapshot.get('cache_hits')} 次")
-
-    if args.dry_run:
+    if dry_run:
         print("（dry-run，未写盘）")
     elif filled:
-        _save(payload)
-        print(f"已写入 {config.RESTAURANTS_PATH}（备份 .bak）")
+        _save(path, payload)
+        print(f"已写入 {path}（备份 .bak）")
+    return filled, skipped, failed
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="补门店坐标")
+    parser.add_argument("--dry-run", action="store_true", help="只打印不写盘")
+    parser.add_argument("--only", default="", help="只处理名称命中这些关键词的门店，多个用逗号分隔")
+    parser.add_argument(
+        "--target",
+        default="restaurants",
+        choices=["restaurants", "delivery", "canteen", "all"],
+        help="补哪一类数据（默认 restaurants）",
+    )
+    args = parser.parse_args()
+
+    if not config.MAP_ENABLED:
+        print("未配置百度地图 AK：请在 .env 里填写 BAIDU_MAP_AK 后重试。")
+        return 2
+
+    targets = ["restaurants", "delivery", "canteen"] if args.target == "all" else [args.target]
+    only_kw = [s.strip() for s in args.only.split(",") if s.strip()]
+    total = [0, 0, 0]
+    for target in targets:
+        filled, skipped, failed = _enrich_one(target, args.dry_run, only_kw)
+        total[0] += len(filled)
+        total[1] += len(skipped)
+        total[2] += len(failed)
+
+    snapshot = gw.snapshot()
+    print(f"\n合计：写入 {total[0]} 家，留空 {total[1]} 家，失败 {total[2]} 家")
+    print(f"地图额度：今日检索 {snapshot.get('daily_search')}/{snapshot.get('daily_search_limit')}，缓存命中 {snapshot.get('cache_hits')} 次")
     return 0
 
 
