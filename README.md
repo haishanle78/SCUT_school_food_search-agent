@@ -26,7 +26,8 @@ SDK/
 │   ├── route_planner.py     # 门店检索、指定门店查询、路线核实、官方路线链接
 │   ├── food_search.py       # 本地知识库检索（真实库为空时明确提示转联网）
 │   ├── budget_nutrition.py  # 预算核算 + 荤素搭配
-│   └── __init__.py          # 9 个工具注册 + 参数容错适配层
+│   ├── weather_gateway.py   # ★ 天气统一网关：30 分钟缓存/错误分类/决策翻译（雨→外卖优先）
+│   └── __init__.py          # 10 个工具注册 + 参数容错适配层
 ├── web/
 │   ├── server.py            # 单端口服务：限流、消息长度、每日上限、地图统计
 │   └── static/index.html    # 聊天页：出发点选择 + 推荐卡片 + 推理过程
@@ -38,7 +39,8 @@ SDK/
 ├── tests/
 │   ├── test_protocol.py     # 消息协议压力测试
 │   ├── test_poi_consistency.py  # POI 一致性 10 项
-│   └── test_map_gateway.py  # 地图治理+门店真实性 13 项（对应验收标准）
+│   ├── test_map_gateway.py  # 地图治理+门店真实性 13 项（对应验收标准）
+│   └── test_weather_gateway.py  # 天气网关 12 项（决策翻译/缓存/降级/注入/密钥卫生）
 └── data_collect/问卷模板.md
 ```
 
@@ -155,7 +157,7 @@ MAX_TOOL_CALLS_PER_TURN=10      # 单轮工具调用预算
 ## 4. 架构要点（答辩对照）
 
 **四要素**：LLM（tool-calling 循环，最多 8 步）｜记忆（会话历史 + 画像 + 知识库）｜
-工具（9 个）｜评测护栏（3 套测试 + 确定性兜底）。
+工具（10 个）｜评测护栏（4 套测试 + 确定性兜底）。
 
 ### 4.1 地图额度治理（`tools/map_gateway.py`）
 
@@ -262,6 +264,8 @@ python tests/test_map_gateway.py      # 13 项：限流提示、配额熔断、�
                                       #        附属POI拒绝、指定店不替换、卡片硬校验、密钥卫生
 python tests/test_concurrency.py      # 8 项：LLM Key 池排队/分流/熔断/故障转移、20 路并发
                                       #        防雪崩、上下文预算、地图 AK 池故障转移/独立配额/负载均衡
+python tests/test_weather_gateway.py  # 12 项：雨/高温决策翻译、全站缓存、超时降级、
+                                      #        system prompt 注入/摘除、工具注册、密钥卫生
 ```
 
 全部用 mock 网络，不消耗真实额度；发布前必须全绿。
@@ -272,7 +276,7 @@ python tests/test_concurrency.py      # 8 项：LLM Key 池排队/分流/熔断/
 
 - 发布：owner 在 WorkBuddy 用「发布应用」把整个目录上传到云端容器跑 `python web/server.py`（平台注入 `PORT`）。
   **发布是快照**：本地改完必须重新发布才上线。
-- 校验：`python verify_deploy.py`，比对本地与线上 `/api/status` 的 `build` 指纹（11 个源码文件）。
+- 校验：`python verify_deploy.py`，比对本地与线上 `/api/status` 的 `build` 指纹（14 个源码文件）。
 
 ---
 
@@ -294,9 +298,10 @@ python tests/test_concurrency.py      # 8 项：LLM Key 池排队/分流/熔断/
 - [x] 接口限流与工具预算、build 指纹校验
 - [x] **真实门店库 57 家**（周边 2–3km 10 家 + 5 个商圈 47 家，两篇攻略人工整理）+ 58 条评价
 - [x] 出口资源池化：LLM Key 池（排队/分流/熔断）+ 地图 AK 池 + 上下文预算（防 8K 限速）
+- [x] 天气感知（`tools/weather_gateway.py`：百度天气 API + 30 分钟全站缓存，
+      雨→外卖优先/步行≤10 分钟、高温→近店优先，决策由后端确定性规则翻译，失败静默降级）
 - [ ] 问卷实测评价补到每店 ≥3 条（当前每店 1 条，属单人观点，页面标「样本不足 3」）
 - [ ] 坐标补录（AK 到手后跑 `tools/enrich_coords.py`，一次性约 60–120 次检索）
-- [ ] 天气感知（雨天推外卖/近店）
 - [ ] 定时推送（工作日 11:00 / 17:00）
 - [ ] 可选：高德做第二来源核对、RapidFuzz 提升别名匹配、Tavily 搜公开网页线索
 

@@ -23,6 +23,8 @@ import config
 # 这里强制打开并给一个假 AK，保证没有 .env / 没有真实 AK 的队友也能直接跑测试。
 config.MAP_ENABLED = True
 config.BAIDU_MAP_AK = config.BAIDU_MAP_AK or "test-ak"
+# 天气模块走真实网络，单测一律关闭（保持"全 mock、零额度消耗"的传统）
+config.WEATHER_ENABLED = False
 
 import tools.route_planner as rp
 from agent.core import FoodAdvisorAgent

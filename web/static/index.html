@@ -721,6 +721,30 @@ document.getElementById("filter-go").onclick = () => {
 };
 
 /* ---------- 发送 ---------- */
+/* 单次提问的超时：地图检索 + 逐家路线核实 + 模型生成，最长约 60s，留足余量 */
+const CHAT_TIMEOUT_MS = 90000;
+
+async function postChat(text, timeoutMs) {
+  // AbortController 是这次修复的核心：没有它，服务重启后浏览器复用死连接会导致
+  // fetch 永久挂起（不返回也不报错，界面一直转圈）
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(api("/api/chat"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify(withSid({ message: text })),
+      signal: ctrl.signal,
+    });
+    return { res, data: await res.json(), aborted: false };
+  } catch (err) {
+    return { res: null, data: null, aborted: !!(err && err.name === "AbortError") };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function send() {
   const text = input.value.trim();
   if (!text || busy) return;
@@ -732,36 +756,42 @@ async function send() {
   const typingWrap = addRow("agent", "🦊");
   typingWrap.innerHTML = '<div class="bubble"><div class="typing"><span></span><span></span><span></span></div></div>';
   scrollBottom();
+
+  // 超过 15s 还没回，明确告诉用户在做什么，避免误以为卡死
+  const slowTip = setTimeout(() => {
+    if (!typingWrap.isConnected) return;
+    typingWrap.innerHTML =
+      '<div class="bubble"><div class="typing"><span></span><span></span><span></span></div>' +
+      '<div style="font-size:12px;opacity:.6;margin-top:6px">正在检索周边门店并核实路线，最多等 90 秒…</div></div>';
+    scrollBottom();
+  }, 15000);
+
   try {
-    const res = await fetch(api("/api/chat"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(withSid({ message: text })),
-    });
-    const data = await res.json();
-    typingWrap.remove();
-    if (!res.ok) addAgentMessage("（暂时不能提问：" + (data.error || ("HTTP " + res.status)) + "）");
-    else if (data.error) addAgentMessage("（出错了：" + data.error + "）");
-    else addAgentMessage(data.reply, data.trace, data.cards, data.summary);
-  } catch (err) {
-    // 冷启动/网络抖动：提示并自动重试一次，而不是让用户以为坏了
-    typingWrap.innerHTML = '<div class="bubble">服务刚启动，正在重试…</div>';
-    try {
-      await new Promise((r) => setTimeout(r, 3000));
-      const res2 = await fetch(api("/api/chat"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(withSid({ message: text })),
-      });
-      const data2 = await res2.json();
-      typingWrap.remove();
-      if (!res2.ok) addAgentMessage("（暂时不能提问：" + (data2.error || ("HTTP " + res2.status)) + "）");
-      else addAgentMessage(data2.reply, data2.trace, data2.cards, data2.summary);
-    } catch (err2) {
-      typingWrap.remove();
-      addAgentMessage("（网络异常，服务可能正在启动，请稍等几秒再发一次）");
+    let out = await postChat(text, CHAT_TIMEOUT_MS);
+    // 死连接 / 冷启动 / 超时：自动重试一次（换一条新连接），用户无感
+    if (!out.res) {
+      if (typingWrap.isConnected) {
+        typingWrap.innerHTML = '<div class="bubble">连接有点问题，正在自动重试一次…</div>';
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+      out = await postChat(text, CHAT_TIMEOUT_MS);
+    }
+    if (typingWrap.isConnected) typingWrap.remove();
+    if (!out.res) {
+      addAgentMessage(
+        out.aborted
+          ? "（这次等太久了，已中止。可能是服务刚重启或网络中断——请刷新页面后再试一次）"
+          : "（网络异常，没能收到回答。请刷新页面后再试一次；若一直如此，确认服务是否还在运行）"
+      );
+    } else if (!out.res.ok) {
+      addAgentMessage("（暂时不能提问：" + ((out.data && out.data.error) || ("HTTP " + out.res.status)) + "）");
+    } else if (out.data.error) {
+      addAgentMessage("（出错了：" + out.data.error + "）");
+    } else {
+      addAgentMessage(out.data.reply, out.data.trace, out.data.cards, out.data.summary);
     }
   } finally {
+    clearTimeout(slowTip);
     busy = false;
     sendBtn.disabled = false;
     input.focus();

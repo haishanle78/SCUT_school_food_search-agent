@@ -158,6 +158,12 @@ MAP_CACHE_TTL_SEARCH = int(os.getenv("MAP_CACHE_TTL_SEARCH", "600"))  # 检索�
 MAP_CACHE_TTL_ROUTE = int(os.getenv("MAP_CACHE_TTL_ROUTE", "600"))    # 路线缓存（秒）
 MAP_USAGE_PATH = os.path.join(DATA_DIR, "map_usage.json")             # 当日调用计数（持久化）
 
+# ---------- 天气感知（复用百度地图 AK；天气接口免费额度独立，不占检索/路线配额） ----------
+WEATHER_DISTRICT_ID = os.getenv("WEATHER_DISTRICT_ID", "440113")   # 广州市番禺区（校区所在行政区划代码）
+WEATHER_TIMEOUT = float(os.getenv("WEATHER_TIMEOUT", "6"))         # 单次天气请求超时（秒）
+WEATHER_CACHE_TTL = int(os.getenv("WEATHER_CACHE_TTL", "1800"))    # 缓存 30 分钟：天气变化慢，避免频繁打接口
+WEATHER_ENABLED = bool(BAIDU_MAP_AK)                               # 有地图 AK 才启用；无 AK 时静默降级
+
 # ---------- 接口安全与预算 ----------
 MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "400"))       # 单条消息长度上限
 CHAT_RATE_PER_MIN = int(os.getenv("CHAT_RATE_PER_MIN", "8"))         # 每会话每分钟提问上限

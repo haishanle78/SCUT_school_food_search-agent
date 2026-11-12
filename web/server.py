@@ -50,6 +50,7 @@ BUILD_FILES = (
     "tools/map_gateway.py",
     "tools/kb_index.py",
     "tools/kb_search.py",
+    "tools/weather_gateway.py",
     "web/server.py",
     "web/static/index.html",
 )

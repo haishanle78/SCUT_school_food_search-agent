@@ -13,6 +13,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
+
+# 天气模块走真实网络，单测一律关闭（天气是增强项，协议测试与它无关）
+config.WEATHER_ENABLED = False
+
 from agent.core import FoodAdvisorAgent, _trace
 from agent.memory import ConversationMemory, UserProfile
 from llm.client import AssistantMessage, ToolCall

@@ -20,6 +20,8 @@ import config
 
 config.MAP_ENABLED = True
 config.BAIDU_MAP_AK = config.BAIDU_MAP_AK or "test-ak"
+# 天气模块走真实网络，单测一律关闭（本文件只测地图治理）
+config.WEATHER_ENABLED = False
 
 from agent.core import FoodAdvisorAgent  # noqa: E402
 from agent.memory import ConversationMemory, UserProfile  # noqa: E402
