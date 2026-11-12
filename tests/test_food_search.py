@@ -144,6 +144,42 @@ def test_exception_safe() -> None:
         rp.search_poi = original
 
 
+def test_delivery_scene_isolation() -> None:
+    print("[6] 场景互斥：堂食检索不混入外卖店")
+    dine_in = run("辣", taste="辣", max_minutes=15)
+    cats = {i.get("类别") for i in dine_in.get("结果", [])}
+    check("堂食检索结果里没有外卖条目", "外卖" not in cats, str(cats))
+    check("堂食检索仍有结果", bool(dine_in.get("结果")), str(dine_in)[:100])
+
+    takeaway = run("外卖")
+    cats2 = {i.get("类别") for i in takeaway.get("结果", [])}
+    check("外卖检索能命中外卖店", "外卖" in cats2, str(cats2))
+
+    spicy_takeaway = run("外卖", taste="辣")
+    names = [i["名称"] for i in spicy_takeaway.get("结果", [])]
+    check("外卖+口味组合可用", bool(names), str(names)[:100])
+    # 经过同义词扩展后「辣」会连带湘菜/川菜，所以这三个字都算辣味店
+    check(
+        "外卖+口味结果都是辣味店",
+        all(any(k in json.dumps(i, ensure_ascii=False) for k in ("辣", "湘", "川"))
+            for i in spicy_takeaway.get("结果", [])),
+        str(names),
+    )
+
+    # 口语口味词要归一到知识库标签：模型常把「推荐几个外卖」传成 taste="爱辣"
+    slang = run("外卖", taste="爱辣")
+    check("口语口味「爱辣」不被过滤成空", bool(slang.get("结果")), str(slang)[:120])
+    check(
+        "「爱辣」与「辣」召回一致",
+        {i["名称"] for i in slang.get("结果", [])} == {i["名称"] for i in spicy_takeaway.get("结果", [])},
+        f"爱辣={[i['名称'] for i in slang.get('结果', [])]} 辣={names}",
+    )
+
+    # 口味词不是地图能检索的品类，拿它联网只会白烧额度
+    pure_taste = run("外卖", taste="清淡")
+    check("场景词+纯口味词不触发联网", "联网检索" not in pure_taste, str(pure_taste)[:120])
+
+
 def main() -> None:
     config.KB_DEMO = False
     test_kb_hit_no_online()
@@ -151,6 +187,7 @@ def main() -> None:
     test_kb_miss_quota_note()
     test_scene_word_no_online()
     test_exception_safe()
+    test_delivery_scene_isolation()
     print(f"\n通过 {PASSED} 项" + ("" if not FAILED else f"，失败 {len(FAILED)} 项：{FAILED}"))
     raise SystemExit(0 if not FAILED else 1)
 
