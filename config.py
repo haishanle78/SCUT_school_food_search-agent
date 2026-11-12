@@ -97,8 +97,11 @@ PROFILE_PATH = os.path.join(DATA_DIR, "user_profile.json")
 # 真实评价语料：一行一条 JSON（字段见 data/kb/README.md）
 KB_DIR = os.path.join(DATA_DIR, "kb")
 KB_REVIEWS_PATH = os.path.join(KB_DIR, "reviews.jsonl")
-# 演示模式：只用 data/examples/demo_*.json 跑界面与接口，绝不与真实库混用
+# 演示模式：只读 KB_DEMO_DIR 下的 demo_stores.json / demo_reviews.jsonl，
+# 绝不与真实库混用。仓库**不附带**演示语料（避免假商家混进正式推荐）；
+# 需要演示或测试时，请自备该目录，测试用例会临时生成固定数据。
 KB_DEMO = os.getenv("KB_DEMO", "").strip().lower() in {"1", "true", "yes", "on"}
+KB_DEMO_DIR = os.getenv("KB_DEMO_DIR", os.path.join(DATA_DIR, "examples"))
 KB_MIN_SAMPLES = int(os.getenv("KB_MIN_SAMPLES", "3"))  # 少于该样本数不出均值，只报样本数
 
 # ---------- 地图调用治理（控制额度，避免触发并发/配额限制） ----------

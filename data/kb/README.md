@@ -28,7 +28,9 @@
 
 ## 示例
 
-见 `data/examples/demo_reviews.jsonl`（演示语料，`KB_DEMO=1` 时才读取，正式推荐不使用）。
+仓库不附带演示语料。需要演示时自备 `demo_stores.json` 与 `demo_reviews.jsonl`，
+放在 `KB_DEMO_DIR`（默认 `data/examples`）下，`KB_DEMO=1` 才读取；正式推荐永不使用。
+测试样例由 `tests/test_kb.py` 在临时目录生成，不会进入 `data/`。
 
 ## 入库纪律
 

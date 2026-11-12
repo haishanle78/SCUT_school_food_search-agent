@@ -7,7 +7,9 @@
 - 谁都不能绕过本模块编数字——这是"知识库"区别于"模型印象"的地方。
 
 演示模式（KB_DEMO=1）：
-读 data/examples/demo_*.json 的演示语料，接口返回 demo=True，前端会挂横幅。
+读 KB_DEMO_DIR（默认 data/examples）下的 demo_stores.json / demo_reviews.jsonl，
+接口返回 demo=True，前端会挂横幅。仓库不附带这些文件——需要演示或测试时自备，
+测试用例会临时生成固定语料；文件缺失时返回空库，绝不编造商家。
 正式模式只读 data/ 下的真实数据；真实库为空时如实返回空，绝不拿示例冒充。
 """
 
@@ -24,8 +26,13 @@ from tools.kb_index import BM25Index, normalize, normalize_scores
 
 _CACHE: Dict[str, Any] = {"signature": None}
 
-_DEMO_STORES = os.path.join(config.DATA_DIR, "examples", "demo_stores.json")
-_DEMO_REVIEWS = os.path.join(config.DATA_DIR, "examples", "demo_reviews.jsonl")
+def _demo_paths() -> tuple[str, str]:
+    """演示语料路径（运行时解析，便于测试指向临时目录）。"""
+    base = getattr(config, "KB_DEMO_DIR", os.path.join(config.DATA_DIR, "examples"))
+    return (
+        os.path.join(base, "demo_stores.json"),
+        os.path.join(base, "demo_reviews.jsonl"),
+    )
 
 
 # ---------- 语料读取 ----------
@@ -54,21 +61,25 @@ def is_demo() -> bool:
 
 def load_stores() -> List[Dict[str, Any]]:
     if is_demo():
-        if not os.path.exists(_DEMO_STORES):
-            return []
-        with open(_DEMO_STORES, "r", encoding="utf-8") as handle:
+        demo_stores, _ = _demo_paths()
+        if not os.path.exists(demo_stores):
+            return []  # 仓库不附带演示语料；缺文件就是空库，不编造
+        with open(demo_stores, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
         return list(payload.get("stores") or [])
     return [s for s in _all_places() if _name(s)]
 
 
 def load_reviews() -> List[Dict[str, Any]]:
-    return _read_jsonl(_DEMO_REVIEWS if is_demo() else config.KB_REVIEWS_PATH)
+    if is_demo():
+        _, demo_reviews = _demo_paths()
+        return _read_jsonl(demo_reviews)
+    return _read_jsonl(config.KB_REVIEWS_PATH)
 
 
 # ---------- 索引 ----------
 def _signature() -> str:
-    paths = [_DEMO_STORES, _DEMO_REVIEWS] if is_demo() else [
+    paths = list(_demo_paths()) if is_demo() else [
         config.RESTAURANTS_PATH, config.CANTEEN_PATH, config.DELIVERY_PATH, config.KB_REVIEWS_PATH,
     ]
     parts = []

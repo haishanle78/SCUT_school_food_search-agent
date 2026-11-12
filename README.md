@@ -239,21 +239,25 @@ python tests/test_map_gateway.py      # 13 项：限流提示、配额熔断、�
 | `web/server.py` | 三个只读接口 `/api/kb/status` `/api/kb/search` `/api/kb/store` |
 | `web/static/index.html` | 视图切换 + 检索页 + 店铺详情弹窗 |
 | `data/kb/reviews.jsonl` | 真实评价语料 58 条（两家攻略整理，字段见 `data/kb/README.md`）|
-| `tests/test_kb.py` | 49 项：召回、过滤、统计一致性、来源标注、孤儿评价、演示隔离 |
+| `tests/test_kb.py` | 58 项：召回、过滤、统计一致性、来源标注、孤儿评价、缺语料降级 |
 
 ### 10.2 两条铁律
 
 1. **评分与评价只由后端统计**：均值、样本数、分布、摘录全部由 `kb_search` 算出，
    带来源与日期；模型与前端都不允许自己编数字。样本少于 `KB_MIN_SAMPLES`（默认 3）
    时标记「样本不足」，只报条数。
-2. **演示数据与真实数据物理隔离**：`KB_DEMO=1` 才读 `data/examples/demo_*.json`，
-   接口返回 `demo=true`，页面顶部挂横幅；正式模式只读 `data/`，空库如实返回 0 条。
+2. **演示数据与真实数据物理隔离**：`KB_DEMO=1` 才读 `KB_DEMO_DIR`（默认
+   `data/examples`）下的演示语料，接口返回 `demo=true`，页面顶部挂横幅；
+   正式模式只读 `data/`，空库如实返回 0 条。
+   **仓库不附带任何演示语料**（避免假商家混进正式推荐）；需要演示时自备该目录，
+   测试由 `tests/test_kb.py` 在临时目录生成固定小样本，用完即弃。
 
 ### 10.3 跑法
 
 ```bash
-# 界面联调（演示语料）
-KB_DEMO=1 python web/server.py     # Windows: set KB_DEMO=1 && python web/server.py
+# 界面联调（需自备演示语料目录：demo_stores.json + demo_reviews.jsonl）
+KB_DEMO=1 KB_DEMO_DIR=path/to/fixtures python web/server.py
+# Windows: set KB_DEMO=1 && set KB_DEMO_DIR=path\to\fixtures && python web/server.py
 # 打开 http://localhost:8787/#kb
 
 # 只看检索层
