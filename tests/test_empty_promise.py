@@ -131,8 +131,9 @@ def test_repeat_promise_fallback() -> None:
     answer = agent.run(QUESTION)
 
     check("有回复且不是空话", bool(answer) and "请稍等" not in answer, answer[:80])
-    check("走了兜底（标注知识库检索结果）", "知识库检索结果" in answer, answer[:80])
-    check("兜底内容来自真实知识库", ("｜" in answer) or ("没有" in answer), answer[:120])
+    check("走了兜底（以知识库为依据）", "知识库" in answer, answer[:80])
+    check("兜底内容来自真实知识库（有结果或如实说无匹配）",
+          ("｜" in answer) or ("没有匹配" in answer) or ("没有" in answer), answer[:160])
 
 
 def test_max_steps_message() -> None:

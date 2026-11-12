@@ -12,6 +12,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
+
+# 干净环境（无 .env）也要能跑：联网开关强制打开，AK 用假值；
+# 本测试对 route_planner.search_poi 全程 mock，不会真的发请求。
+config.MAP_ENABLED = True
+config.BAIDU_MAP_AK = config.BAIDU_MAP_AK or "test-ak"
+
 import importlib
 
 fs = importlib.import_module("tools.food_search")  # 注意：tools 包属性里 food_search 是函数，须用 importlib 拿模块

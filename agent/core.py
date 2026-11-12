@@ -718,6 +718,13 @@ class FoodAdvisorAgent:
         result = self.functions["food_search"](query=query, taste=taste, budget_max=budget, max_minutes=minutes)
         data = json.loads(result)
         if not data.get("结果"):
+            from tools.food_search import _all_places
+            total = len(_all_places())
+            if total:
+                return (
+                    f"（按你给的条件，本地知识库（共 {total} 家）里没有匹配的门店。"
+                    "可以放宽预算或步行时间，或换个口味再问我一次。）"
+                )
             return (
                 "（离线模式：本地知识库暂无真实数据。示例数据已隔离、不用于正式推荐；"
                 "联网检索与 LLM 推理需要配置 API Key 后使用。）"
