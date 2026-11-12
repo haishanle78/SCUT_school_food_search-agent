@@ -25,7 +25,13 @@ from llm.client import AssistantMessage, LLMClient, ToolCall
 from llm.keypool import LLMBusy
 from tools import build_registry
 from tools import map_gateway, weather_gateway
-from tools.route_planner import build_place_link, build_route_link, current_origin, set_origin
+from tools.route_planner import (
+    build_place_link,
+    build_route_link,
+    current_origin,
+    enrich_poi_from_kb,
+    set_origin,
+)
 
 MODE_KEYWORDS = {
     "riding": ("骑行", "单车", "自行车", "骑车"),
@@ -227,6 +233,9 @@ class FoodAdvisorAgent:
             # 交通字段改成配送参考，路线链接改成地图标注（不是导航）。
             is_delivery = str(poi.get("类别") or "") == "外卖"
 
+            # 地图结果缺人均/评分时，用知识库同名记录补（高置信才补，标来源）
+            if poi.get("来源") != "本地知识库":
+                poi = enrich_poi_from_kb(poi)
             route = dict(poi.get("路线") or {})
             if route.get("起点") and route["起点"] != self.origin_key:
                 route = {}  # 出发点变了，旧路线作废（不能让用户在旧起点数据上做决定）
@@ -308,6 +317,7 @@ class FoodAdvisorAgent:
                 # 事实/未知分离
                 "price_per_person": price,
                 "price_source": price_source,
+                "price_note": poi.get("人均性质") or (poi.get("测评来源") or ""),
                 "rating": poi.get("学生评分"),        # 只有知识库才有评分
                 "open_hours": poi.get("营业时间") or "待确认",
                 "delivery": rec.get("delivery") if rec.get("delivery") is not None else poi.get("可外卖"),
@@ -801,7 +811,10 @@ class FoodAdvisorAgent:
             "   → 先调 find_restaurant(店名) 确认这家店的身份；\n"
             "   → 找到：只讲这家店（地址、是否超出校区范围、值不值得去），要路线再 verify_route(uid, mode)；\n"
             "   → 没找到明确匹配：如实说没查到，并追问校门/地标/地址。**绝不换成别的店，也不改推荐其他店**；\n"
-            "   → 只查到『XX-门前停车场』这类附属地点：说明这是停车场不是餐馆本体，请用户确认具体位置。\n"
+            "   → 只查到『XX-门前停车场』这类附属地点：说明这是停车场不是餐馆本体，请用户确认具体位置；\n"
+            "   → 返回 kb_no_coord（资料里有、但无核实坐标）：只讲资料（人均/口碑/类别），"
+            "明确标注来源与『位置待核实』，**不要给步行时间/距离/导航，也不要出推荐卡片**，"
+            "更不能因为地图只搜到停车场就说这家店不存在。\n"
             "B. 附近推荐（『附近有什么好吃的粥』『推荐个粤菜』）\n"
             "   → food_search 先查本地库 → 无匹配自动联网（3 公里硬限制，无需再调 search_poi）→ verify_route 核实\n"
             "   → format_recommendation 出卡片 → 给整体建议。\n"

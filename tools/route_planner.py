@@ -373,6 +373,33 @@ def register_kb_poi(
     return uid
 
 
+def enrich_poi_from_kb(poi: Dict[str, Any]) -> Dict[str, Any]:
+    """用知识库补全联网 POI 缺失的事实字段（人均/评分/营业时间/外卖能力）。
+
+    只在高置信同名（相似度 ≥0.9）时补，避免张冠李戴；只补空字段，不覆盖地图事实。
+    补进来的字段带来源标注，卡片按「知识库」展示，仍不是实测就当「预估/攻略整理」。
+    """
+    if not poi:
+        return poi
+    if all(poi.get(k) not in (None, "") for k in ("人均", "学生评分")):
+        return poi
+    kb = _kb_lookup(str(poi.get("名称") or ""))
+    if not kb:
+        return poi
+    if _name_similarity(str(poi.get("名称") or ""), str(kb.get("名称") or kb.get("店名") or "")) < 0.9:
+        return poi
+    filled = False
+    for key in ("人均", "学生评分", "营业时间", "可外卖", "平均配送分钟"):
+        if poi.get(key) in (None, "") and kb.get(key) not in (None, ""):
+            poi[key] = kb[key]
+            filled = True
+    if filled:
+        poi["知识库补充"] = True
+        poi["人均性质"] = "攻略整理/预估" if kb.get("测评来源") else "待核实"
+        poi["测评来源"] = kb.get("测评来源") or ""
+    return poi
+
+
 def find_restaurant(
     name: str,
     poi_store: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -392,7 +419,44 @@ def find_restaurant(
     #    但坐标缺失时不能就此收工：本地记录只能证明「这家店存在」，
     #    证明不了它在哪。此时继续联网检索，把坐标补上。
     kb = _kb_lookup(store_name)
-    if kb and str(kb.get("坐标") or "").strip():
+    if kb and not str(kb.get("坐标") or "").strip():
+        # 知识库确认存在，但缺坐标：只展示资料，不做导航，也不许换店。
+        # 不能因为地图上只有"门前停车场"就反过来说这家店不存在——两者是不同的事实。
+        walk = (kb.get("交通") or {}).get("步行")
+        is_delivery = str(kb.get("类别") or "") == "外卖"
+        payload = {
+            "状态": "kb_no_coord",
+            "来源": "本地真实知识库",
+            "名称": kb.get("正式名称") or kb.get("名称") or kb.get("店名"),
+            "别名": kb.get("别名") or [],
+            "地址": kb.get("地址") or "待确认",
+            "坐标": None,
+            "类别": kb.get("类别"),
+            "人均": kb.get("人均"),
+            "人均性质": "攻略整理/预估" if kb.get("测评来源") else "待确认",
+            "口碑": kb.get("一句话点评") or "",
+            "数据来源": kb.get("测评来源") or "待确认",
+            "提示": (
+                "外卖店，无公开地图点位属于正常情况（群内下单/配送到校）。"
+                if is_delivery else
+                "知识库确认这家店存在，但暂无核实过的坐标，因此无法生成导航。"
+            ),
+            "要求": (
+                "如实说明：资料里有这家店，但位置待确认，所以不提供步行时间、距离、导航和推荐卡片；"
+                "可以给出攻略里的人均/口碑并标注来源与『待核实』；"
+                "不要因为地图只搜到停车场就断言这家店不存在，也不要替换成其他店。"
+            ),
+        }
+        if is_delivery:
+            payload["配送参考"] = (
+                f"{kb.get('平均配送分钟')} 分钟（预估）" if kb.get("平均配送分钟") else "待确认"
+            )
+            payload["下单入口"] = "具体下单入口待确认（群内下单/配送到校）"
+        elif walk:
+            payload["攻略步行参考"] = f"{walk} 分钟（攻略整理，未经路线接口核实）"
+        return json.dumps(payload, ensure_ascii=False)
+
+    if kb:
         coord = kb.get("坐标")
         uid = register_kb_poi(store, kb, kind=str(kb.get("类别") or ""))
         name_final = kb.get("正式名称") or kb.get("名称") or kb.get("店名")
