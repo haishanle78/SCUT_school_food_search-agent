@@ -111,9 +111,9 @@ def make_agent() -> FoodAdvisorAgent:
 def test_specified_store_not_substituted():
     def handler(path, params):
         query = params.get("query", "")
-        if "停车场" in query or "B记" in query:
+        if "停车场" in query or "甲记" in query:
             return gw.MapResult(gw.OK, payload={"status": 0, "results": [
-                poi("p1", "B记鱼粥-门前停车场", tag="停车场;停车位", address="荣华里-5号楼"),
+                poi("p1", "甲记鱼粥-门前停车场", tag="停车场;停车位", address="测试路5号楼"),
             ]})
         # 只有一家"相似但不同"的粥店
         return gw.MapResult(gw.OK, payload={"status": 0, "results": [
@@ -121,11 +121,11 @@ def test_specified_store_not_substituted():
         ]})
 
     with FakeTransport(handler):
-        data = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+        data = json.loads(rp.find_restaurant("甲记鱼粥", poi_store={}))
     assert data["状态"] == "auxiliary_only", f"停车场不应被当作门店: {data}"
     assert "停车场" in data["提示"] and "不能作为门店" in data["提示"]
-    assert data["uid" if "uid" in data else "店名"] == "B记鱼粥"
-    ok("验收1/2 只返回『B记鱼粥-门前停车场』时：不生成门店，如实说明并要地标")
+    assert data["店名"] == "甲记鱼粥"
+    ok("验收1/2 只返回『甲记鱼粥-门前停车场』时：不生成门店，如实说明并要地标")
 
     # 名称相近但不同：只能给候选，不能当答案
     def handler2(path, params):
@@ -134,11 +134,11 @@ def test_specified_store_not_substituted():
         ]})
 
     with FakeTransport(handler2):
-        data2 = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+        data2 = json.loads(rp.find_restaurant("甲记鱼粥", poi_store={}))
     assert data2["状态"] in ("uncertain", "no_result"), f"相似店不得直接认定为同一家: {data2}"
     assert data2["状态"] != "match", "相似店不能被判定为确认匹配"
     assert "不确定" in data2.get("提示", "") or "不能确认" in data2.get("提示", "")
-    assert "B记鱼粥" in json.dumps(data2, ensure_ascii=False)
+    assert "甲记鱼粥" in json.dumps(data2, ensure_ascii=False)
     ok("验收1 指定店名查不到时：不替换成恒源客家佬粥粉面，候选人需用户确认")
 
 
@@ -302,8 +302,21 @@ def test_global_rate_limit():
         config.MAP_QPS, config.MAP_MAX_WAIT = old_qps, old_wait
 
 
+# ---------- 验收1c：知识库有资料但无坐标 ----------
+
+def test_kb_no_coord() -> None:
+    data = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+    assert data["状态"] == "kb_no_coord", f"应识别为『有资料无坐标』: {data}"
+    assert data.get("坐标") is None and data.get("地址") == "待确认"
+    assert "导航" in data["提示"] or "位置待确认" in data["要求"]
+    assert "不要替换" in data["要求"], "必须明确禁止换成别的店"
+    assert "攻略步行参考" in data and "未经路线接口核实" in data["攻略步行参考"]
+    ok("验收1c 知识库有资料但无坐标：展示资料 + 标注待核实，不给导航、不替换")
+
+
 if __name__ == "__main__":
     test_specified_store_not_substituted()
+    test_kb_no_coord()
     test_rate_limit_and_quota_messages()
     test_cache_and_modes()
     test_single_flight()
