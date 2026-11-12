@@ -559,10 +559,16 @@ function renderCards(cards, summary) {
     if (c.price_per_person != null) tags += '<span class="tag money">人均 ¥' + esc(String(c.price_per_person)) + (c.price_source === "模型预估" ? "（预估）" : "") + "</span>";
     else tags += '<span class="tag">人均待确认</span>';
     if (c.route_verified) tags += '<span class="tag good">路线已核实</span>';
+    if (t.delivery_min != null) tags += '<span class="tag">🛵 配送约 ' + esc(String(t.delivery_min)) + " 分钟</span>";
+    if (c.delivery_only) tags += '<span class="tag good">外卖店·无需步行</span>';
     if (t.walk_min != null) tags += '<span class="tag">🚶 步行 ' + esc(String(t.walk_min)) + " 分钟</span>";
     if (t.ride_min != null) tags += '<span class="tag">🚲 骑行 ' + esc(String(t.ride_min)) + " 分钟</span>";
     if (t.taxi_min != null) tags += '<span class="tag">🚕 打车 ' + esc(String(t.taxi_min)) + " 分钟</span>";
-    if (c.straight_distance_m != null) tags += '<span class="tag">直线 ' + esc(String(c.straight_distance_m)) + " 米</span>";
+    if (c.straight_distance_m != null) {
+      const dm = Number(c.straight_distance_m);
+      tags += '<span class="tag">直线 ' + esc(dm >= 1000 ? (dm / 1000).toFixed(1) + " 公里" : dm + " 米") + "</span>";
+    }
+    if (t["距离说明"]) tags += '<span class="tag bad">' + esc(String(t["距离说明"])) + "</span>";
     if (c.delivery === true) tags += '<span class="tag good">可外卖</span>';
     else if (c.delivery === false) tags += '<span class="tag">建议到店</span>';
     if (c.exceeds_walk_limit) tags += '<span class="tag bad">超步行上限·替代方案</span>';
@@ -579,10 +585,10 @@ function renderCards(cards, summary) {
       + (c.reason ? '<div class="card-text"><b>推荐：</b>' + esc(String(c.reason)) + "</div>" : "")
       + (c.warning ? '<div class="card-text"><b>避雷：</b>' + esc(String(c.warning)) + "</div>" : "")
       + (c.worth_it ? '<div class="card-text"><b>值不值：</b>' + esc(String(c.worth_it)) + "</div>" : "")
-      + (t["来源"] ? '<div class="route-fact">路线来源：' + esc(String(t["来源"])) + (t["查询时间"] ? " · " + esc(String(t["查询时间"])) : "") + "</div>" : '<div class="route-fact">路线：暂无法确认</div>')
+      + (t["来源"] ? '<div class="route-fact">' + (c.delivery_only ? "配送参考：" : "路线来源：") + esc(String(t["来源"])) + (t["查询时间"] ? " · " + esc(String(t["查询时间"])) : "") + "</div>" : (c.delivery_only ? '<div class="route-fact">配送时长：待确认</div>' : '<div class="route-fact">路线：暂无法确认</div>'))
       + '<div class="card-foot">'
       + (c.route_link
-        ? '<a class="map-link" target="_blank" rel="noopener" href="' + esc(String(c.route_link)) + '">🗺️ 官方路线（' + esc(String(c.origin || "校区")) + ' → 这家店）</a>'
+        ? '<a class="map-link" target="_blank" rel="noopener" href="' + esc(String(c.route_link)) + '">' + (c.delivery_only ? "🗺️ 地图位置（确认是哪家店）" : "🗺️ 官方路线（" + esc(String(c.origin || "校区")) + " → 这家店）") + "</a>"
         : '<span class="delivery-flag">暂无法生成路线链接</span>')
       + '<span class="delivery-flag">' + (c.delivery === true ? "懒得出门也能点" : (c.delivery === false ? "建议到店吃" : "外卖待确认")) + "</span></div>";
     wrap.appendChild(card);

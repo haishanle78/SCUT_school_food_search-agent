@@ -23,7 +23,7 @@ import config
 from agent.memory import ConversationMemory, UserProfile
 from llm.client import AssistantMessage, LLMClient, ToolCall
 from tools import build_registry
-from tools.route_planner import build_route_link, current_origin, set_origin
+from tools.route_planner import build_place_link, build_route_link, current_origin, set_origin
 from tools import map_gateway
 
 MODE_KEYWORDS = {
@@ -35,6 +35,59 @@ MODE_KEYWORDS = {
 def _trace(text: str) -> None:
     """推理过程可视化：答辩时评委能看到每一步在干什么。"""
     print(f"  [推理] {text}")
+
+
+_WALK_TALK_RE = re.compile(r"步行|骑行|走路|走过去|打车|坐车|地铁|自驾|单车|自行车")
+
+
+def _strip_walk_talk(text: Any) -> str:
+    """外卖卡片文案清洗：删掉「步行 38 分钟」「配送约 35 分钟」这类与后端事实冲突的描述。
+
+    模型即使被禁止，也会把 verify_route 拿到的数据顺手写进推荐理由，
+    结果卡片上出现「推荐外卖 + 步行 139 分钟」这种自相矛盾的话。
+    外卖卡片的时间只来自后端按距离估算的 transport.delivery_min，
+    模型自己猜的分钟数（往往和后端算的差 5-10 分钟）一律删掉，只留口味/价格/分量这些解释。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    kept = []
+    for seg in re.split(r"(?<=[。；;！!？?，,])", raw):
+        seg = seg.strip()
+        if not seg:
+            continue
+        if _WALK_TALK_RE.search(seg):
+            continue
+        if re.search(r"\d+\s*分钟", seg):
+            continue
+        kept.append(seg)
+    out = "".join(kept).strip(" ，,。;；")
+    return out or "详见卡片上的配送参考"
+
+
+def _estimate_delivery_min(distance_m: Any, fallback: Any = None) -> Any:
+    """按直线距离估算外卖参考配送时长。
+
+    知识库里的「平均配送分钟」是人工按品类猜的，7 公里外的店也写 40 分钟就不自洽了。
+    卡片上的距离和时长是并排展示的，两者必须互相说得通，否则一眼假。
+    """
+    try:
+        dist = float(distance_m)
+    except (TypeError, ValueError):
+        return fallback
+    if dist <= 0:
+        return fallback
+    if dist <= 1000:
+        return 25
+    if dist <= 2000:
+        return 30
+    if dist <= 3500:
+        return 38
+    if dist <= 5000:
+        return 45
+    if dist <= 8000:
+        return 55
+    return 65
 
 
 class FoodAdvisorAgent:
@@ -124,8 +177,12 @@ class FoodAdvisorAgent:
         模型填的人均只能标为"预估"。
         """
         cards: List[Dict[str, Any]] = []
+        seen_uids: set[str] = set()
         for rec in recs:
             uid = str(rec.get("uid") or "").strip()
+            if uid and uid in seen_uids:
+                continue  # 同一家店被重复推荐（模型常见的复制粘贴），只保留第一次
+            seen_uids.add(uid)
             poi = self.poi_store.get(uid)
             if poi is None:
                 self.last_dropped.append({"uid": uid or "?", "原因": "uid 未核实（不在本次检索结果中）"})
@@ -137,28 +194,52 @@ class FoodAdvisorAgent:
                 self.last_dropped.append({"uid": uid, "名称": poi.get("名称"), "原因": "超出校区推荐范围"})
                 continue
 
+            # 外卖店不存在「从宿舍走过去」：只要有坐标就够出卡片，
+            # 交通字段改成配送参考，路线链接改成地图标注（不是导航）。
+            is_delivery = str(poi.get("类别") or "") == "外卖"
+
             route = dict(poi.get("路线") or {})
             if route.get("起点") and route["起点"] != self.origin_key:
                 route = {}  # 出发点变了，旧路线作废（不能让用户在旧起点数据上做决定）
-            needed = [m for m in self._needed_modes if m in ("walking", "riding", "driving")]
-            label = {"walking": "步行", "riding": "骑行", "driving": "打车"}
-            verified = all(route.get(label[m]) for m in needed) if needed else bool(route)
-            if not verified:
-                missing = "、".join(label[m] for m in needed if not route.get(label[m]))
-                self.last_dropped.append(
-                    {"uid": uid, "名称": poi.get("名称"), "原因": f"路线未核实（缺 {missing or '所需方式'}）"}
-                )
-                continue
+            if is_delivery:
+                verified = bool(str(poi.get("坐标") or "").strip())
+                if not verified:
+                    self.last_dropped.append(
+                        {"uid": uid, "名称": poi.get("名称"), "原因": "外卖店缺少坐标，无法确认位置"}
+                    )
+                    continue
+            else:
+                needed = [m for m in self._needed_modes if m in ("walking", "riding", "driving")]
+                label = {"walking": "步行", "riding": "骑行", "driving": "打车"}
+                verified = all(route.get(label[m]) for m in needed) if needed else bool(route)
+                if not verified:
+                    missing = "、".join(label[m] for m in needed if not route.get(label[m]))
+                    self.last_dropped.append(
+                        {"uid": uid, "名称": poi.get("名称"), "原因": f"路线未核实（缺 {missing or '所需方式'}）"}
+                    )
+                    continue
 
             transport: Dict[str, Any] = {}
-            for lbl, key in (("步行", "walk_min"), ("骑行", "ride_min"), ("打车", "taxi_min")):
-                fact = route.get(lbl)
-                if fact:
-                    transport[key] = fact.get("分钟")
-            transport["来源"] = route.get("来源", "")
-            transport["查询时间"] = route.get("查询时间", "")
-            if route.get("步行"):
-                transport["步行距离_米"] = route["步行"].get("距离_米")
+            if is_delivery:
+                dist = poi.get("直线距离_米")
+                transport["delivery_min"] = _estimate_delivery_min(dist, poi.get("平均配送分钟"))
+                if isinstance(dist, (int, float)) and dist > 0:
+                    # 卡片上的距离和配送时长必须自洽：7 公里外的店不可能 40 分钟送到
+                    transport["距离说明"] = (
+                        f"距校区约 {dist / 1000:.1f} 公里"
+                        + ("，超出常规配送半径，可能需要自取或配送费较高" if dist > 4000 else "")
+                    )
+                transport["来源"] = poi.get("来源") or "本地知识库"
+                transport["查询时间"] = ""
+            else:
+                for lbl, key in (("步行", "walk_min"), ("骑行", "ride_min"), ("打车", "taxi_min")):
+                    fact = route.get(lbl)
+                    if fact:
+                        transport[key] = fact.get("分钟")
+                transport["来源"] = route.get("来源", "")
+                transport["查询时间"] = route.get("查询时间", "")
+                if route.get("步行"):
+                    transport["步行距离_米"] = route["步行"].get("距离_米")
 
             # 人均：知识库有数据才算事实，否则模型值只能标"预估"
             kb_price = poi.get("人均")
@@ -173,23 +254,28 @@ class FoodAdvisorAgent:
             card = {
                 "uid": uid,
                 "identity_verified": True,          # 身份已核实
-                "route_verified": True,             # 路线已核实（本次所需方式）
+                "route_verified": bool(verified) and not is_delivery,  # 外卖没有路线，不冒充已核实
+                "delivery_only": is_delivery,
                 "name": poi.get("名称"),             # 后端事实：完整店名（含分店）
                 "address": poi.get("地址"),           # 后端事实：完整地址
                 "district": poi.get("行政区"),         # 后端事实：行政区
                 "straight_distance_m": poi.get("直线距离_米"),
-                "transport": transport,              # 后端事实：真实路线
-                "route_link": build_route_link(
-                    poi.get("名称", ""), str(poi.get("坐标", "")),
-                    mode=self._needed_modes[0] if self._needed_modes else "walking",
-                    origin=self.origin,
+                "transport": transport,              # 后端事实：真实路线 / 配送参考
+                "route_link": (
+                    build_place_link(poi.get("名称", ""), str(poi.get("坐标", "")), str(poi.get("地址") or ""))
+                    if is_delivery
+                    else build_route_link(
+                        poi.get("名称", ""), str(poi.get("坐标", "")),
+                        mode=self._needed_modes[0] if self._needed_modes else "walking",
+                        origin=self.origin,
+                    )
                 ) if poi.get("坐标") else None,
                 "origin": self.origin["name"],       # 出发点，便于核对
-                # 解释性字段（模型职责）
-                "cuisine": rec.get("cuisine", ""),
-                "reason": rec.get("reason", ""),
-                "warning": rec.get("warning", ""),
-                "worth_it": rec.get("worth_it", ""),
+            # 解释性字段（模型职责）
+            "cuisine": rec.get("cuisine", ""),
+            "reason": _strip_walk_talk(rec.get("reason", "")) if is_delivery else rec.get("reason", ""),
+            "warning": _strip_walk_talk(rec.get("warning", "")) if is_delivery else rec.get("warning", ""),
+            "worth_it": _strip_walk_talk(rec.get("worth_it", "")) if is_delivery else rec.get("worth_it", ""),
                 # 事实/未知分离
                 "price_per_person": price,
                 "price_source": price_source,
@@ -396,6 +482,10 @@ class FoodAdvisorAgent:
         r"查询中|我(帮你|帮您|去|来)查|让我(查|看)|等我)"
     )
 
+    # 「没查就推荐」判定：用户要的是吃喝推荐 + 回复已经成段
+    _REC_RE = re.compile(r"推荐|哪家|有什么|附近|求|想吃|去哪")
+    _FOOD_RE = re.compile(r"吃|外卖|饭|餐|食堂|窗口|菜|夜宵|下午茶|粉|面|粥")
+
     def _is_empty_promise(self, content: str, used_tools: int) -> bool:
         """判断这条回复是不是「只说要查、实际没查」的空话。"""
         if used_tools or self.last_cards:
@@ -408,20 +498,25 @@ class FoodAdvisorAgent:
     def _nudge_reason(self, content: str, used_tools: int, user_input: str) -> str:
         """判断是否需要逼模型干活，返回原因（空串表示不需要）。
 
-        两类小模型常见"不干活"：
-          promise —— 只回「请稍等/马上查」，实际没调工具；
-          clarify —— 用户已经给了口味/预算/步行时间，它却反问「你想吃什么口味」。
+        三类小模型常见"不干活"：
+          promise  —— 只回「请稍等/马上查」，实际没调工具；
+          clarify  —— 用户已经给了口味/预算/步行时间，它却反问「你想吃什么口味」；
+          no_tools —— 一轮工具都没调，却直接写出一整段推荐（店名全是记忆里的品牌，
+                      不是知识库或地图返回的事实）。这类回答最长最像样，也最危险。
         """
         if used_tools or self.last_cards:
             return ""
         text = (content or "").strip()
-        if not text or len(text) > 220:
+        if not text:
             return ""
-        if self._PROMISE_RE.search(text):
+        if len(text) <= 220 and self._PROMISE_RE.search(text):
             return "promise"
         _q, taste, budget, minutes = self._parse_constraints(user_input)
-        if (taste or budget is not None or minutes is not None) and ("？" in text or "?" in text):
+        if len(text) <= 220 and (taste or budget is not None or minutes is not None) and ("？" in text or "?" in text):
             return "clarify"
+        # 成段的推荐却没有一次检索：正文里的店名不可能有出处
+        if len(text) >= 40 and self._REC_RE.search(user_input) and self._FOOD_RE.search(user_input):
+            return "no_tools"
         return ""
 
     _NUDGE_TEXT = {
@@ -434,6 +529,12 @@ class FoodAdvisorAgent:
             "（系统提醒：用户已经给出了口味/预算/步行时间等条件，不要再反问这些。"
             "现在立刻调用 food_search 检索并给出结论；确实缺关键信息时，"
             "最多只问一个问题，同时必须先基于现有条件给出可执行的推荐。）"
+        ),
+        "no_tools": (
+            "（系统提醒：这一轮你还没有调用任何工具，就写出了一整段推荐——里面的店名全部来自你的记忆，"
+            "而本项目只允许推荐知识库或地图返回的门店，那些品牌在本校区附近有没有、开不开、送不送外卖都无法确认。"
+            "现在立刻调用 food_search 检索（外卖场景 query 用「外卖」），拿到真实门店后再推荐；"
+            "检索不到就如实说没有匹配。）"
         ),
     }
 
@@ -463,6 +564,26 @@ class FoodAdvisorAgent:
         func = self.functions.get(tc.name)
         if func is None:
             return json.dumps({"error": f"未知工具: {tc.name}，可用: {list(self.functions)}"}, ensure_ascii=False)
+        # 外卖店没有「走过去」这回事：模型一旦拿到步行/骑行分钟数，就会写进推荐理由，
+        # 出现「推荐外卖，步行 139 分钟」这种自相矛盾的结论。直接在入口拦掉，同时省地图额度。
+        if tc.name == "verify_route":
+            _args = tc.parse_arguments()
+            _poi = self.poi_store.get(str(_args.get("uid") or "")) or {}
+            if str(_poi.get("类别") or "") == "外卖":
+                return json.dumps(
+                    {
+                        "状态": "skipped",
+                        "名称": _poi.get("名称"),
+                        "说明": "外卖店不需要路线核实，用户不会走过去",
+                        "可用事实": {
+                            "地址": _poi.get("地址"),
+                            "直线距离_米": _poi.get("直线距离_米"),
+                        },
+                        "要求": "推荐外卖时只说口味、价格、配送；距离用「距校区约 X 公里」，"
+                                "不要提步行/骑行几分钟，也不要再对这家店调 verify_route。",
+                    },
+                    ensure_ascii=False,
+                )
         try:
             output = func(**tc.parse_arguments())
         except TypeError as exc:
@@ -578,6 +699,8 @@ class FoodAdvisorAgent:
             "B. 附近推荐（『附近有什么好吃的粥』『推荐个粤菜』）\n"
             "   → food_search 先查本地库 → 无匹配自动联网（3 公里硬限制，无需再调 search_poi）→ verify_route 核实\n"
             "   → format_recommendation 出卡片 → 给整体建议。\n"
+            "   → **点外卖时 query 固定传「外卖」、口味放 taste 参数**（如 query=外卖, taste=辣）；\n"
+            "     query 传「辣」会被当成堂食检索，外卖店不会出现在结果里（这是刻意的场景互斥）。\n"
             "C. 路线查询（『怎么去X』）→ find_restaurant 确认身份 → verify_route(uid, mode)。\n"
             "D. 门店比较（『这两家哪家近』）→ 各自 find_restaurant + verify_route，逐项对比，不要合成泛推荐。\n\n"
             "【地图额度纪律（很重要）】\n"
@@ -603,7 +726,12 @@ class FoodAdvisorAgent:
             "【推荐卡片】\n"
             "确定推荐后调用 format_recommendation，每家只传 uid + 解释性字段（菜系、预估人均、理由、避雷、值不值）；"
             "名称/地址/耗时/距离/地图链接由后端注入。后端会校验身份、餐饮类型、范围和路线，"
-            "不通过的会被剔除——没有合规的店就不要硬凑。\n\n"
+            "不通过的会被剔除——没有合规的店就不要硬凑。\n"
+            "**外卖店（food_search 结果里 类别=外卖）不需要 verify_route**：有坐标就直接进卡片，"
+            "卡片会显示配送参考和地图位置；堂食店仍然必须先 verify_route。\n"
+            "**外卖店的正文、reason、warning 里只写口味、价格和配送，禁止写「步行几分钟/距离几公里」**——"
+            "外卖不是走过去的，后端也从未为外卖店算过步行路线，写了就是编造；"
+            "要提醒远近就说「距校区约 X 公里，配送可能偏慢」。\n\n"
             f"【当前出发点】{self.origin['name']}（坐标来自地图实测，检索与路线均以此为起点）\n"
             "默认就用这个出发点，**不要反问用户在哪个位置**；用户主动说『从南门/北门走』时，"
             "提示他可以在页面顶部切换出发点。系统没有手机实时定位，不要声称知道用户的当前位置。\n"

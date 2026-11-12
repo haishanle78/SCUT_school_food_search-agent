@@ -228,6 +228,33 @@ def test_card_nudge_no_false_positive() -> None:
     check("非检索场景不催卡片", len(agent3.llm.payloads) == 1)
 
 
+def test_no_tools_recommendation() -> None:
+    print("[10] 一次工具都没调就成段推荐 → 强制检索，反复不听则规则兜底")
+    hallucinated = (
+        "根据您的需求，推荐以下几家：华莱士炸鸡汉堡人均 20-30 元，麦肯基的汉堡套餐也在 30 元内，"
+        "吉野家的牛肉饭套餐同样实惠，便利店便当也可以考虑。建议参考外卖平台评价再下单。"
+    )
+    agent = make_agent([hallucinated, hallucinated, hallucinated])
+    reply = agent._react_loop("推荐几个外卖，预算30以内")
+
+    nudged = any(
+        isinstance(m.get("content"), str) and "还没有调用任何工具" in m["content"]
+        for payload in agent.llm.payloads for m in payload
+    )
+    check("no_tools 纠正消息已注入", nudged)
+    check("模型被要求重新执行", agent.llm.i >= 2, str(agent.llm.i))
+    check("没有把凭空推荐的品牌当成答案返回", "华莱士" not in reply, reply[:80])
+    check("两次不听后用规则检索兜底真实知识库", "知识库检索结果" in reply, reply[:120])
+
+
+def test_no_tools_not_triggered_for_short_reply() -> None:
+    print("[11] 短回复（追问/寒暄）不触发 no_tools")
+    agent = make_agent(["x"])
+    check("短追问不误判", agent._nudge_reason("想吃点什么口味的呢？", 0, "帮我推荐点吃的") == "")
+    check("与吃喝无关的推荐不误判", agent._nudge_reason(
+        "根据你的口味，我推荐这几部电影，都很适合周末看，节奏舒缓、画面漂亮。", 0, "推荐个剧") == "")
+
+
 if __name__ == "__main__":
     config.KB_DEMO = False
     test_promise_detection()
@@ -239,5 +266,7 @@ if __name__ == "__main__":
     test_no_nudge_for_open_question()
     test_card_missing_nudge()
     test_card_nudge_no_false_positive()
+    test_no_tools_recommendation()
+    test_no_tools_not_triggered_for_short_reply()
     print(f"\n通过 {PASSED} 项" + ("" if not FAILED else f"，失败 {len(FAILED)} 项：{FAILED}"))
     raise SystemExit(0 if not FAILED else 1)
