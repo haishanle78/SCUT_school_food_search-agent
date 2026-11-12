@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 项目根加�
 
 import config
 from agent.core import FoodAdvisorAgent, _trace
+from llm.client import get_pool
 from agent.memory import ConversationMemory, UserProfile
 from llm.client import get_pool
 from tools import map_gateway
@@ -196,6 +197,8 @@ class Handler(BaseHTTPRequestHandler):
                     "tool_calls_per_turn": config.MAX_TOOL_CALLS_PER_TURN,
                 },
                 "map_stats": map_gateway.snapshot(),
+                # 模型通道池（Key 打码）：能直接看到几把钥匙、是否在冷却
+                "llm_pool": get_pool().snapshot() if config.LLM_ENABLED else {"keys": 0},
             })
         elif path == "/api/health":
             self._send(200, {
@@ -337,6 +340,8 @@ class Handler(BaseHTTPRequestHandler):
                 "origin": origin_name,
                 "profile": sess.profile.data,
                 "map_stats": map_gateway.snapshot(),
+                # 模型通道池（Key 打码）：能直接看到几把钥匙、是否在冷却
+                "llm_pool": get_pool().snapshot() if config.LLM_ENABLED else {"keys": 0},
             })
             return
 

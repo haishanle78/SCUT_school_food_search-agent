@@ -31,7 +31,12 @@ class LLMBusy(RuntimeError):
 
     与普通 RuntimeError 的区别：上层必须把它当「稍后再试」处理，
     绝不能触发离线降级（离线模式查空知识库只会更糟）。
+    retry_after：建议等待秒数（全部 Key 冷却时 = 最早解冻剩余时间）。
     """
+
+    def __init__(self, message: str, retry_after: int = 0) -> None:
+        super().__init__(message)
+        self.retry_after = max(0, int(retry_after))
 
 
 class _Slot:
@@ -88,8 +93,15 @@ class KeyPool:
                         s.used += 1
                         return s
             if time.monotonic() >= deadline:
+                with self._lock:
+                    now_wall = time.time()
+                    lefts = [s.breaker_until - now_wall for s in self._slots]
+                cooling = [x for x in lefts if x > 0]
+                # 全部 Key 都在冷却 → 告诉用户真实等待时长；否则只是排队没抢到名额
+                retry_after = int(min(cooling)) + 1 if cooling and len(cooling) == len(self._slots) else 10
                 raise LLMBusy(
-                    f"所有模型通道都在忙，排队 {self._queue_wait:.0f} 秒未排到"
+                    f"所有模型通道都在忙，排队 {self._queue_wait:.0f} 秒未排到",
+                    retry_after=retry_after,
                 )
             time.sleep(0.05)
 

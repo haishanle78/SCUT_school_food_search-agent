@@ -71,7 +71,7 @@ LLM_ENABLED = bool(LLM_PROVIDER in {"deepseek", "openai"} and LLM_KEYS)
 # glm-4-flash 免费档：单 Key 并发上限 2；上下文超 8K token 后速率被大幅限制。
 LLM_CONCURRENCY_PER_KEY = int(os.getenv("LLM_CONCURRENCY_PER_KEY", "2"))   # 单 Key 并发路数
 LLM_QUEUE_WAIT = float(os.getenv("LLM_QUEUE_WAIT", "10"))                  # 排队等待上限（秒），超时返回"稍后再试"
-LLM_BREAKER_COOLDOWN = int(os.getenv("LLM_BREAKER_COOLDOWN", "600"))       # Key 限流后的熔断时长（秒）
+LLM_BREAKER_COOLDOWN = int(os.getenv("LLM_BREAKER_COOLDOWN", "120"))       # Key 限流后的熔断时长（秒）
 # 上下文字符预算（messages + tools 的 JSON 总字符数）。中文约 1 字符 ≈ 1 token，
 # 14000 字符 ≈ 8K token 出头，超限会主动裁剪，避免触发智谱的 8K 限速档。
 LLM_CONTEXT_CHAR_LIMIT = int(os.getenv("LLM_CONTEXT_CHAR_LIMIT", "14000"))

@@ -186,13 +186,15 @@ class FoodAdvisorAgent:
                 reply = self._filter_cards_by_walk_limit(reply, user_input)
                 reply = self._guard_text_walk_limit(reply, user_input)
                 return self._guard_walking_constraint(reply, user_input)
-            except LLMBusy:
+            except LLMBusy as busy:
                 # 排队超时 ≠ 服务坏了：给用户明确预期，绝不能降级到离线模式
-                self._trace_fn("模型通道排队超时，返回稍后再试提示")
-                return (
-                    "现在提问的同学有点多，模型通道都占满了。请等 10 秒左右再发一次，"
-                    "你的问题我还记着呢。"
-                )
+                wait = getattr(busy, "retry_after", 10) or 10
+                self._trace_fn(f"模型通道排队超时（建议 {wait} 秒后重试），返回稍后再试提示")
+                if wait >= 60:
+                    text = f"模型通道刚被限流，正在冷却，约 {max(1, round(wait / 60))} 分钟后自动恢复，不用重开页面。"
+                else:
+                    text = f"现在模型通道有点挤，请等 {wait} 秒左右再发一次，你的问题我还记着呢。"
+                return text + "（这不是你的操作问题，也不是服务挂了。）"
             except RuntimeError as exc:
                 self._trace_fn(f"LLM 异常，切换离线模式: {exc}")
         return self._offline_fallback(user_input)
