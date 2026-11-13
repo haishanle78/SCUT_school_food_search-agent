@@ -234,6 +234,82 @@ def _is_taste_word(term: str) -> bool:
     return any(key and key in (term or "") for key in SYNONYMS)
 
 
+def _walk_minutes(item: Dict[str, Any]) -> int | None:
+    """取「已核实的步行分钟数」；0 / 缺失 / 乱码一律当作「未核实」返回 None。
+
+    ★ 0 不是「0 分钟就到」，是这条记录没填步行时间。
+    知识库里 43/54 家堂食没有步行数据，把它当 0 会让「步行 5 分钟内」搜出全城，
+    当 999 又会把真正 3 分钟的店一起滤掉。所以它既不能进、也不能出，只能「未知」。
+    """
+    walk = (item.get("交通") or {}).get("步行")
+    if walk in (None, "", 0, "0"):
+        return None
+    try:
+        value = int(float(walk))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _walk_within_limit(item: Dict[str, Any], max_minutes: int | None, want_delivery: bool) -> bool:
+    """「步行上限」的严格判定：只有核实过、且确实没超，才算符合。
+
+    和 _match 的分工：
+      _match 宽松——未知的保留，让用户看到「有这家店，步行待确认」；
+      本函数严格——只有它敢说「符合 15 分钟」。放宽口味/放宽预算这类
+      「本来就已经让了一步」的兜底列表，必须用严格版，否则拿未核实的距离
+      凑出来的结果，用户走一趟才发现要 40 分钟。
+    """
+    if max_minutes is None or want_delivery:
+        return True
+    walk = _walk_minutes(item)
+    return walk is not None and walk <= int(max_minutes)
+
+
+def _taste_in_other_scene(
+    places: List[Dict[str, Any]],
+    query: str,
+    terms: List[str],
+    budget_max: float | None,
+    want_delivery: bool,
+) -> List[Dict[str, Any]]:
+    """当前场景没有的口味，是不是「装在了另一个场景里」。
+
+    真实案例：用户说「想吃辣的，30 以内，步行 15 分钟」，堂食库里一家辣味都没有
+    （3 家辣味店全在外卖库），而放宽口味后的兜底把一家 12 公里外、评分 1 分、
+    没有步行数据的店捞出来当推荐。正确的回答是「堂食没有，外卖有这 3 家」。
+    """
+    opposite = [
+        p
+        for p in places
+        if str(p.get("类别") or "") == ("饭堂窗口" if want_delivery else "外卖")
+    ]
+    # 外卖库的条目天然「可外卖」，用它自己的场景去匹配，才能过 _match 的场景互斥
+    hits = [
+        p
+        for p in opposite
+        if _match(p, query, terms, budget_max, None, not want_delivery, "dine_in" if want_delivery else "delivery")
+    ]
+    hits.sort(key=lambda p: -float(p.get("学生评分", 0) or 0))
+    return hits[:5]
+
+
+def _describe_places(items: List[Dict[str, Any]]) -> str:
+    """把店名列成「A（人均 28 元，评分 3.8）、B…」——报价给人看也够精确。"""
+    bits = []
+    for p in items:
+        name = p.get("名称") or p.get("店名") or p.get("窗口名")
+        price = p.get("人均")
+        score = p.get("学生评分")
+        extra = []
+        if price not in (None, ""):
+            extra.append(f"人均{price}元")
+        if score not in (None, ""):
+            extra.append(f"评分{score}")
+        bits.append(f"{name}（{'，'.join(extra)}）" if extra else str(name))
+    return "、".join(bits)
+
+
 def _match(
     item: Dict[str, Any],
     query: str,
@@ -267,12 +343,16 @@ def _match(
 
     # 步行上限只对堂食有意义：外卖不走路，拿步行分钟筛外卖是错的。
     if max_minutes is not None and not want_delivery:
-        try:
-            walk = int(item.get("交通", {}).get("步行", 999))
-            if walk > int(max_minutes):
-                return False
-        except (TypeError, ValueError):
-            pass
+        # 数据里「步行 = 0 / 缺失」表示「未核实」，不是真的 0 分钟，也不是 999 分钟。
+        # 不能因此把店筛掉——那是数据缺口，不是距离事实。
+        # 只有明确测得超过上限的才排除；未知的保留，由卡片/正文标「步行时间待确认」。
+        walk_raw = (item.get("交通") or {}).get("步行")
+        if walk_raw not in (None, 0):
+            try:
+                if int(walk_raw) > int(max_minutes):
+                    return False
+            except (TypeError, ValueError):
+                pass
 
     # 只有「私域外卖库」里明确标注不可外卖的店才排除；
     # 其他店配送能力未知，交给卡片标注，不在这里一刀切。
@@ -377,11 +457,23 @@ def food_search(
 
     hits = named or [p for p in places if _match(p, query, terms, budget_max, max_minutes, want_delivery, mode)]
     taste_relaxed = ""
+    taste_elsewhere: List[Dict[str, Any]] = []
     if not hits and terms:
+        # 第 0 步：先问「这个口味是不是装在另一个场景里」。
+        # 堂食 15 分钟内没有辣味，不代表用户吃不上辣——外卖库里有 3 家。
+        # 这时候实话比兜底有用，也避免把一家 12 公里外、评分 1 分的店当成推荐。
+        taste_elsewhere = _taste_in_other_scene(places, query, terms, budget_max, want_delivery)
+    if not hits and terms and not taste_elsewhere:
         # 口味词把结果全灭了：可能是模型自己加的口味（用户原话里并没有），
         # 或者知识库还没有这个口味标签。此时放宽【口味】给结果，但绝不放宽菜系——
         # 用户明确要汉堡，就不能拿酸菜鱼凑数。
-        hits = [p for p in places if _match(p, query, [], budget_max, max_minutes, want_delivery, mode)]
+        # ★ 也绝不放宽「距离」：步行时间没核实过的店，不能算进「步行 15 分钟内」。
+        hits = [
+            p
+            for p in places
+            if _match(p, query, [], budget_max, max_minutes, want_delivery, mode)
+            and _walk_within_limit(p, max_minutes, want_delivery)
+        ]
         if hits:
             taste_relaxed = (
                 f"没有严格符合「{taste}」口味的门店，以下结果已放宽【口味】约束"
@@ -396,7 +488,18 @@ def food_search(
             -float(p.get("学生评分", 0) or 0),
         ))
     elif not named:
-        hits.sort(key=lambda p: (-float(p.get("学生评分", 0) or 0), int(p.get("交通", {}).get("步行", 0) or 0)))
+        if max_minutes is not None and not want_delivery:
+            # 用户给了步行上限时，核实过分钟数的店排前面：
+            # 「有步行数据、确实在 15 分钟内」比「评分高但不知道多远」更该被先看到。
+            hits.sort(
+                key=lambda p: (
+                    0 if _walk_minutes(p) is not None else 1,
+                    -float(p.get("学生评分", 0) or 0),
+                    _walk_minutes(p) or 999,
+                )
+            )
+        else:
+            hits.sort(key=lambda p: (-float(p.get("学生评分", 0) or 0), _walk_minutes(p) or 0))
 
     # ---- ① 本地有匹配：只返回本地结果，不消耗地图额度 ----
     if hits:
@@ -412,10 +515,24 @@ def food_search(
                 uid = register_kb_poi(poi_store, p, kind=str(p.get("类别") or ""))
                 if uid:
                     p["_resolved_uid"] = uid
+        unknown_walk = (
+            max_minutes is not None
+            and not want_delivery
+            and any(_walk_minutes(p) is None for p in hits[:5])
+        )
         return json.dumps(
             {
                 "用餐方式": mode or "未指定",
                 **({"口味说明": taste_relaxed, "需询问用户": True} if taste_relaxed else {}),
+                **(
+                    {
+                        "步行说明": "结果里有门店的步行时间未核实（知识库缺这条数据），"
+                        "只能说「步行时间待确认」，不能说成「步行 X 分钟内」；"
+                        "已经核实过的门店优先推荐"
+                    }
+                    if unknown_walk
+                    else {}
+                ),
                 **(
                     {
                         "匹配方式": "按店名命中：用户问的是这一家店，直接用知识库记录回答，"
@@ -508,7 +625,10 @@ def food_search(
     # 而不是一句「可放宽口味/预算/时间约束」的套话。
     relaxed: Dict[str, Any] = {}
     if budget_max is not None:
-        wider_budget = [p for p in places if _match(p, query, terms, None, max_minutes)]
+        # 注意：_match 必须带 want_delivery / dining_mode，
+        # 否则这里抛 TypeError，整个「放宽建议」分支直接崩溃降级成联网搜「辣」，
+        # 用户看到的就是一堆毫不相关的肠粉店。
+        wider_budget = [p for p in places if _match(p, query, terms, None, max_minutes, want_delivery, mode)]
         if wider_budget:
             wider_budget.sort(key=lambda p: float(p.get("人均", 0) or 0))
             relaxed["放宽预算"] = [
@@ -516,7 +636,7 @@ def food_search(
                 for p in wider_budget[:3]
             ]
     if max_minutes is not None:
-        wider_time = [p for p in places if _match(p, query, terms, budget_max, None)]
+        wider_time = [p for p in places if _match(p, query, terms, budget_max, None, want_delivery, mode)]
         if wider_time:
             wider_time.sort(key=lambda p: int((p.get("交通") or {}).get("步行", 999) or 999))
             relaxed["放宽时间"] = [
@@ -548,6 +668,22 @@ def food_search(
             "用户坚持堂食就如实说这个时间范围内没有匹配，禁止声称「知识库里其实有符合条件的店」。"
         )
 
+    # 口味只存在于另一个场景：要堂食、辣味店全在外卖库。
+    # 以前这里会放宽口味，把一家 12 公里外、评分 1 分、没有步行数据的店当推荐——
+    # 用户照着走过去 40 分钟，回来给个差评。实话比兜底有用。
+    if taste_elsewhere:
+        scene_label = "外卖" if want_delivery else "堂食"
+        other_label = "堂食" if want_delivery else "外卖"
+        other_mode = "dine_in" if want_delivery else "delivery"
+        relaxed["该口味只在另一场景"] = (
+            f"当前「{scene_label}」场景里没有符合「{taste}」的门店；"
+            f"{other_label}库里有：{_describe_places(taste_elsewhere)}。"
+            f"这些是{other_label}店，不能说成符合条件的{scene_label}。"
+            f"用户能接受{other_label}时，用 dining_mode={other_mode} 重新检索一次，"
+            "拿全字段（地址/人均/交通）再走 format_recommendation 出卡片；"
+            "用户坚持堂食就如实说这个范围内没有，不要拿无关门店凑数。"
+        )
+
     # ---- ③ 两边都没有：如实说明 ----
     out = {"结果": [], "用餐方式": mode or "未指定"}
     # 放宽建议（放宽时间/放宽预算/外卖库里有）：比一句「没匹配」有用得多
@@ -570,6 +706,16 @@ def food_search(
         out["提示"] = "本地知识库暂无真实数据（示例数据已隔离，不用于正式推荐）"
         out["下一步"] = "必须改用 search_poi 联网检索周边真实门店，检索结果会带 uid/地址/坐标/距离，再用 verify_route 核实路线"
     else:
-        out["提示"] = "知识库有真实数据但无匹配结果"
-        out["建议"] = "可放宽口味/预算/时间约束后重试"
+        if taste_elsewhere:
+            out["提示"] = f"当前场景（{'外卖' if want_delivery else '堂食'}）知识库里没有「{taste}」相关门店"
+            out["建议"] = (
+                "按「该口味只在另一场景」如实回答，并询问用户是否接受换个场景；"
+                "不要拿无关门店凑数，也不要声称这个条件下有符合的店"
+            )
+        elif relaxed:
+            out["提示"] = "知识库有相关门店，但都被预算/时间/场景条件筛掉了"
+            out["建议"] = "按「放宽预算/放宽时间/外卖库里有」说明差在哪，让用户自己决定是否放宽"
+        else:
+            out["提示"] = "知识库有真实数据但无匹配结果"
+            out["建议"] = "可放宽口味/预算/时间约束后重试"
     return json.dumps(out, ensure_ascii=False)

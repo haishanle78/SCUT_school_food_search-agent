@@ -212,6 +212,7 @@ def main() -> None:
     test_exception_safe()
     test_delivery_scene_isolation()
     test_store_name_query()
+    test_relaxed_taste_keeps_distance_honest()
     print(f"\n通过 {PASSED} 项" + ("" if not FAILED else f"，失败 {len(FAILED)} 项：{FAILED}"))
     raise SystemExit(0 if not FAILED else 1)
 
@@ -234,6 +235,35 @@ def test_store_name_query() -> None:
         check("外卖店带下单方式", bool((data2.get("结果") or [{}])[0].get("下单方式")))
     finally:
         rp.search_poi = original
+
+
+def test_relaxed_taste_keeps_distance_honest() -> None:
+    """放宽口味可以，放宽距离不行。
+
+    真实事故（2026-11-13）：用户「想吃辣的，30 以内，步行 15 分钟」，
+    知识库里辣味店全在外卖库，放宽口味后的兜底捞出一家 12 公里外、
+    评分 1.0、连步行时间都没填的店当推荐。
+    """
+    print("[8] 放宽口味时不许放宽距离：15 分钟内只认核实过的步行时间")
+    data = run("", taste="辣", dining_mode="dine_in", budget_max=30, max_minutes=15)
+    hits = data.get("结果") or []
+    unknown = [i["名称"] for i in hits if (i.get("交通") or {}).get("步行") in (None, "", 0, "0")]
+    check("放宽后没有「步行未核实」的店混进 15 分钟内", not unknown, str(unknown))
+    too_far = [
+        i["名称"]
+        for i in hits
+        if int(float((i.get("交通") or {}).get("步行") or 999)) > 15
+    ]
+    check("放宽后没有超时门店", not too_far, str(too_far))
+    if not hits:
+        hint = str(data.get("该口味只在另一场景") or "")
+        check("堂食没有辣味时说明「外卖库里有」", "外卖库里有" in hint, hint[:80])
+        check("不拿无关门店凑数", "小荔园" not in json.dumps(data, ensure_ascii=False))
+
+    # 反过来：外卖要「辣」时，堂食的店不能被当成外卖交付
+    takeaway = run("", taste="辣", dining_mode="delivery", budget_max=30)
+    kinds = {(i.get("类别") or "") for i in takeaway.get("结果") or []}
+    check("外卖检索不混入堂食门店", kinds <= {"外卖"} or not kinds, str(kinds))
 
 
 if __name__ == "__main__":
