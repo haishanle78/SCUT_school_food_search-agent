@@ -353,7 +353,12 @@ def food_search(
             from tools.route_planner import register_kb_poi
 
             for p in hits[:8]:
-                register_kb_poi(poi_store, p, kind=str(p.get("类别") or ""))
+                # register_kb_poi 会返回真实 uid 或合成 uid（知识库条目没有地图点位时）。
+                # 必须写回结果里，否则返回的 uid 是 None，模型就没法调 format_recommendation
+                # 出卡片——这正是「库里有 5 家日料、一张卡都没有」的直接原因。
+                uid = register_kb_poi(poi_store, p, kind=str(p.get("类别") or ""))
+                if uid:
+                    p["_resolved_uid"] = uid
         return json.dumps(
             {
                 "用餐方式": mode or "未指定",
@@ -377,8 +382,10 @@ def food_search(
                         "可外卖": p.get("可外卖"),
                         "平均配送分钟": p.get("平均配送分钟"),
                         "配送说明": "配送能力/费用/时长未核实，需标待确认" if want_delivery else None,
-                        "uid": p.get("地图uid"),
+                        # 真实地图 uid，或知识库条目的合成 uid（无地图点位时）
+                        "uid": p.get("地图uid") or p.get("_resolved_uid"),
                         "坐标": p.get("坐标"),
+                        "商圈": p.get("商圈"),
                         "来源": "知识库",
                     }
                     for p in hits[:5]

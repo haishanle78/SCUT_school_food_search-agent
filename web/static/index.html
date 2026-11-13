@@ -615,6 +615,10 @@ function renderCards(cards, summary) {
       const dm = Number(c.straight_distance_m);
       tags += '<span class="tag">直线 ' + esc(dm >= 1000 ? (dm / 1000).toFixed(1) + " 公里" : dm + " 米") + "</span>";
     }
+    // 超出 3 公里的店照样可以推荐（「附近没有，最近的在天河城」比「没有匹配」有用），
+    // 但必须一眼看出这不是走路能到的
+    if (c.out_of_range) tags += '<span class="tag bad">超出附近范围·需打车</span>';
+    if (t["位置说明"]) tags += '<span class="tag">' + esc(String(t["位置说明"])) + "</span>";
     if (t["距离说明"]) tags += '<span class="tag bad">' + esc(String(t["距离说明"])) + "</span>";
     if (c.delivery === true) tags += '<span class="tag good">可外卖</span>';
     else if (c.delivery === false) tags += '<span class="tag">建议到店</span>';

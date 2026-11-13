@@ -36,6 +36,34 @@ RADIUS_TOLERANCE_M = 3200  # 后端复核容差（直线距离略大于路网属
 # 给知识库缺坐标的店补坐标时的最大距离：超过这个数几乎肯定是同名的另一家店，
 # 补上去会把学生导到十几公里外。宁可不补，标「位置待确认」。
 MAX_COORD_FILL_M = 8000
+
+# 商圈 → 距校区直线距离（米，约值）。知识库很多店只记了商圈、没记坐标，
+# 有这张表就能告诉用户「在番禺天河城，约 7.5 公里」，而不是含糊的「位置待确认」。
+# 这是估算不是实测，所以对外一律带「约」字，且不用于算路线的精确距离。
+AREA_DISTANCE_M = {
+    "南村": 1500,
+    "长隆商圈": 6000,
+    "番禺天河城": 7500,
+    "四海城": 8000,
+    "番禺万达": 9000,
+    "芳华里": 10000,
+    "琶洲保利广场": 12000,
+    "琶洲保利": 12000,
+    "K11": 13000,
+}
+
+
+def area_distance_m(area: str) -> Optional[int]:
+    """按商圈名估算距校区的直线距离；认不出返回 None。"""
+    key = str(area or "").strip()
+    if not key:
+        return None
+    if key in AREA_DISTANCE_M:
+        return AREA_DISTANCE_M[key]
+    for name, dist in AREA_DISTANCE_M.items():
+        if name and name in key:
+            return dist
+    return None
 ORIGIN_NAME = config.origin_by_key(config.DEFAULT_ORIGIN)["name"]  # 兼容旧引用
 
 MODE_LABEL = {"walking": "步行", "riding": "骑行", "driving": "打车"}
@@ -395,13 +423,25 @@ def register_kb_poi(
     已有同 uid 条目（联网检索先登记过）时不覆盖，只补缺失字段。
     """
     uid = str(item.get("地图uid") or item.get("uid") or "").strip()
-    if not uid:
-        return None
     name = str(item.get("名称") or item.get("店名") or item.get("窗口名") or "").strip()
+    # 知识库里大量条目没有地图 uid（小红书攻略整理来的，本来就没有点位）。
+    # 以前这里直接 return None，导致这些店永远出不了卡片——
+    # 用户问「有没有日料推荐」，库里明明有 5 家，结果一张卡都没有。
+    # 现在给它们一个合成 uid：能参与卡片展示和去重，但不参与路线核实（没有坐标）。
+    synthetic = False
+    if not uid:
+        if not name:
+            return None
+        uid = f"kb::{name}"
+        synthetic = True
     kind = str(kind or item.get("类别") or "").strip()
     dist = item.get("直线距离_米")
+    area = str(item.get("商圈") or "").strip()
+    area_dist = area_distance_m(area)
+    if dist is None and area_dist is not None:
+        dist = area_dist  # 用商圈估算值兜底，标注时带「约」
     # 在范围内：外卖不看步行半径（骑手送得到就行）；堂食按直线距离卡 3 公里，
-    # 避免把番禺天河城/琶洲那些 6–11 公里的商圈店当成「附近推荐」。
+    # 避免把番禺天河城/琶洲那些 6–21 公里的商圈店当成「附近推荐」。
     if kind == "外卖":
         in_range = True
     else:
@@ -413,6 +453,10 @@ def register_kb_poi(
     merged = {
         "uid": uid,
         "名称": entry.get("名称") or name,
+        # 合成 uid 标记：卡片允许展示，但不参与 verify_route（没有坐标可算）
+        "合成uid": entry.get("合成uid", synthetic),
+        "商圈": entry.get("商圈") or area,
+        "商圈距离_米": entry.get("商圈距离_米") or area_dist,
         "地址": entry.get("地址") or item.get("地址") or "",
         "行政区": entry.get("行政区") or item.get("行政区") or "",
         "坐标": entry.get("坐标") or item.get("坐标") or "",

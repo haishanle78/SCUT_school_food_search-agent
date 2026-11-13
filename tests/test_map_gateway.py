@@ -244,6 +244,8 @@ def test_card_validation():
     })
     # 关掉自动补查，明确模拟「有坐标但路线接口也拿不到」的情况（不发真实请求）
     agent._auto_verify_route = lambda uid, modes: {}
+    # 本用例语境是「附近推荐」：用户明确要附近时，超范围仍然剔除
+    agent._nearby_strict = True
 
     cards = agent._inject_card_facts([
         {"uid": "ok1", "cuisine": "粥", "reason": "近"},

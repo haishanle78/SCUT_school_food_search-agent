@@ -136,9 +136,10 @@ def test_dine_in_route_pending_not_dropped() -> None:
 
 
 def test_hard_checks_still_block() -> None:
-    print("[3b] 硬校验未被削弱：编造 uid / 非餐饮 / 超范围 仍然拦截")
+    print("[3b] 硬校验未被削弱：编造 uid / 非餐饮 仍拦截；超范围看场景")
     agent = make_agent()
     agent._auto_verify_route = lambda uid, modes: {}
+    agent._nearby_strict = True  # 「附近推荐」语境：超范围必须剔除
     agent.poi_store["park"] = {"uid": "park", "名称": "某店-门前停车场", "坐标": "23.01,113.39",
                                "是餐饮": False, "在范围内": True, "类别": "联网检索"}
     agent.poi_store["far"] = {"uid": "far", "名称": "跨区店", "坐标": "23.13,113.24",
@@ -148,11 +149,26 @@ def test_hard_checks_still_block() -> None:
         {"uid": "far", "reason": "x"},
         {"uid": "ghost", "reason": "x"},
     ])
-    check("全部被拦截", not cards, str([c.get("name") for c in cards]))
+    check("附近语境下全部被拦截", not cards, str([c.get("name") for c in cards]))
     reasons = " ".join(d.get("原因", "") for d in agent.last_dropped)
     check("原因含附属设施", "附属设施" in reasons, reasons)
     check("原因含超出范围", "超出" in reasons, reasons)
     check("原因含 uid 未核实", "未核实" in reasons, reasons)
+
+    # 只是想吃某品类（没说要附近）时，远店保留但必须标出来
+    # （知识库商圈店通常没有坐标，只有商圈字段——这正是需要商圈估算的场景）
+    agent2 = make_agent()
+    agent2._auto_verify_route = lambda uid, modes: {}
+    agent2._nearby_strict = False
+    agent2.poi_store["far2"] = {"uid": "far2", "名称": "番禺天河城日料店", "坐标": "",
+                                "是餐饮": True, "在范围内": False, "商圈": "番禺天河城",
+                                "商圈距离_米": 7500, "类别": "周边堂食"}
+    cards2 = agent2._inject_card_facts([{"uid": "far2", "reason": "同类推荐"}])
+    check("非附近语境下远店可出卡片", len(cards2) == 1, str(agent2.last_dropped))
+    if cards2:
+        check("标为超出附近范围", cards2[0].get("out_of_range") is True)
+        check("带商圈距离说明", "7.5 公里" in str((cards2[0].get("transport") or {}).get("位置说明")),
+              str(cards2[0].get("transport")))
 
 
 def test_local_hit_registers_poi() -> None:

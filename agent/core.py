@@ -229,6 +229,8 @@ class FoodAdvisorAgent:
     # 混在一起的后果就是「外卖推荐被步行路线校验拦下」——地图搜到的店类别是
     # 「联网检索」，永远不等于「外卖」，于是统统按堂食要求步行路线，全军覆没。
     _dining_mode: str = ""
+    # 用户是否明确要「附近」：决定了超出 3 公里的店是直接剔除，还是保留并标注
+    _nearby_strict: bool = False
     # 本轮诊断信息（只用于日志定位，不含任何密钥；对外不下发）
     _turn_log: Dict[str, Any] = {}
 
@@ -255,6 +257,11 @@ class FoodAdvisorAgent:
         self._used_food_search = False
         self._dining_mode = ""
         self._turn_log = {}
+        # 「附近/周边/走过去」这类明确的空间约束 → 超过 3 公里的店不推荐；
+        # 只说「想吃日料」没说附近 → 附近没有时可以给远处同类店，但要标注距离
+        self._nearby_strict = any(
+            w in user_input for w in ("附近", "周边", "旁边", "走路", "步行", "走过去", "楼下")
+        )
         self._needed_modes = self._detect_modes(user_input)
         set_origin(self.origin)
         # 每轮刷新 system prompt（画像可能上一轮刚被工具更新过）
@@ -351,7 +358,11 @@ class FoodAdvisorAgent:
         if self.poi_store:
             recs: List[Dict[str, Any]] = []
             for uid, poi in self.poi_store.items():
-                if poi.get("是餐饮") is False or poi.get("在范围内") is False:
+                if poi.get("是餐饮") is False:
+                    continue
+                # 用户明确要「附近」时才跳过超范围店；只是想吃某品类时，
+                # 远处的同类店也要给出来（卡片会标距离），否则永远只有一句「没有」
+                if self._nearby_strict and poi.get("在范围内") is False:
                     continue
                 recs.append({
                     "uid": uid,
@@ -443,7 +454,12 @@ class FoodAdvisorAgent:
             if poi.get("是餐饮") is False:
                 self.last_dropped.append({"uid": uid, "名称": poi.get("名称"), "原因": "附属设施，非餐饮门店"})
                 continue
-            if poi.get("在范围内") is False:
+
+            # 超出 3 公里：用户明确要「附近」才剔除；只是想吃某品类时保留，
+            # 卡片上标清距离——「附近没有日料，最近的在番禺天河城约 7.5 公里」
+            # 比「没有匹配」有用得多。
+            out_of_range = poi.get("在范围内") is False
+            if out_of_range and self._nearby_strict:
                 self.last_dropped.append({"uid": uid, "名称": poi.get("名称"), "原因": "超出校区推荐范围"})
                 continue
 
@@ -525,6 +541,19 @@ class FoodAdvisorAgent:
                 if route_pending:
                     # 如实说明：不是「很近」也不是「很远」，是后端没拿到
                     transport["路线状态"] = "待核实（接口未返回可用结果）"
+                if not has_coord:
+                    # 知识库里很多店只有商圈没有坐标：给出「大概在哪、多远」比
+                    # 干巴巴一句「位置待确认」有用，但必须标明是估算。
+                    area = str(poi.get("商圈") or "")
+                    area_dist = poi.get("商圈距离_米")
+                    if area and isinstance(area_dist, (int, float)) and area_dist > 0:
+                        transport["位置说明"] = (
+                            f"在{area}，距校区约 {area_dist / 1000:.1f} 公里（商圈估算）"
+                        )
+                    elif area:
+                        transport["位置说明"] = f"在{area}，具体位置待确认"
+                    else:
+                        transport["位置说明"] = "无地图点位，位置待确认"
 
             # 人均：知识库有数据才算事实，否则模型值只能标"预估"（非数字一律视为无来源）
             kb_price = _as_price(poi.get("人均"))
@@ -545,6 +574,11 @@ class FoodAdvisorAgent:
                 # 本次用餐方式与门店类别分开暴露，前端据此决定显示「配送参考」还是「路线」
                 "dining_mode": "delivery" if is_delivery else "dine_in",
                 "store_kind": poi.get("类别") or "",
+                # 超范围不等于不能推荐：泛品类推荐时给远店并标距离，是有用信息
+                "out_of_range": bool(out_of_range),
+                "area": poi.get("商圈") or "",
+                "area_distance_m": poi.get("商圈距离_米"),
+                "synthetic_uid": bool(poi.get("合成uid")),  # 无地图点位，只有知识库资料
                 "name": poi.get("名称"),             # 后端事实：完整店名（含分店）
                 "address": poi.get("地址"),           # 后端事实：完整地址
                 "district": poi.get("行政区"),         # 后端事实：行政区
@@ -552,7 +586,7 @@ class FoodAdvisorAgent:
                 "transport": transport,              # 后端事实：真实路线 / 配送参考
                 # 没有坐标就不给任何链接：既不能导航到一个不存在的位置，也不能伪造地图标注。
                 # 私域外卖商家常常只有店名，位置待确认是诚实状态，不是缺陷。
-                "coordinate_pending": is_delivery and not has_coord,
+                "coordinate_pending": not has_coord,
                 "route_link": (
                     build_place_link(poi.get("名称", ""), str(poi.get("坐标", "")), str(poi.get("地址") or ""))
                     if is_delivery
@@ -1260,6 +1294,14 @@ class FoodAdvisorAgent:
             "- 门店事实（名称/地址/行政区/耗时/距离/是否在范围内）一律以工具返回为准，禁止凭记忆或想象编写。\n"
             "- 3 公里内没有合适的店就如实说没有匹配，禁止推荐范围外的远店，禁止强凑 Top3。\n"
             "- 用户设了步行/预算上限时，超限的店只能作为「替代方案」并明确标注，不能说成符合条件。\n"
+            "- **同名 vs 同类，规则完全不同**：\n"
+            "  · 用户点名某家店（「紫藏在哪」「有没有一家叫达海煲仔饭的」）→ 只能用这家，"
+            "**绝不能用同品类的其他店顶替**；查不到就如实说查不到，可以补一句「同类型的还有 A/B」，"
+            "但必须讲清那是另一家店，由用户决定要不要看。\n"
+            "  · 用户只说想吃什么品类（「想吃日料」「有没有汉堡」）→ **可以推荐同类店，名字不同没问题**，"
+            "这是正常推荐不是顶替。但必须说明：这是同品类推荐、在哪（商圈/距离）、要不要打车。\n"
+            "- 卡片上标了「超出附近范围」的店，回答里要明确说「不在步行范围，建议打车/骑车过去」，"
+            "不能含糊说成「附近有一家」。\n"
             "- 人均没有依据就写「待确认」，你的估算必须写「预估」；评分、营业时间、能否外卖无来源就写待确认。\n"
             "- 用户提到口味/忌口/去过的店时，调用 remember_preference 记入画像。\n"
             "- **不要回复「请稍等 / 我马上去查 / 正在检索」**：工具调用在用户界面是不可见的，"
