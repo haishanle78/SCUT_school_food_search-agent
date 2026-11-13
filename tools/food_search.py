@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import config
@@ -51,6 +52,53 @@ def _find_place(place_name: str) -> Dict[str, Any] | None:
                 hit.setdefault("类别", kind)
                 return hit
     return None
+
+
+# 用户问店时常见的疑问尾巴：「达海美食怎么样」「小意司日料多少钱」
+_QUESTION_TAIL_RE = re.compile(
+    r"(怎么样|怎么样啊|好不好吃|好吃吗|好吃不|如何|介绍一下|介绍下|介绍|评价|口碑|"
+    r"在哪|怎么走|怎么去|人均多少|人均|多少钱|值得去吗|值得|靠谱吗|推荐吗|好吃)$"
+)
+_QUESTION_HEAD_RE = re.compile(r"^(请问|想问下|想问一下|问一下|帮我看看|你知道)")
+
+
+def _strip_question(query: str) -> str:
+    """把「达海美食怎么样」这类问句还原成店名。"""
+    q = str(query or "").strip()
+    q = _QUESTION_HEAD_RE.sub("", q)
+    for _ in range(2):  # 「怎么样啊」「多少钱呀」可能叠两层
+        q = _QUESTION_TAIL_RE.sub("", q).strip()
+    return q.strip(" ，,。?？!！")
+
+
+def _match_store_by_name(query: str) -> List[Dict[str, Any]]:
+    """按店名精确命中：用户问的是某一家店时，不该被场景互斥/关键词子串卡掉。
+
+    背景：这里的匹配原来是「整个 query 是文本子串」，于是
+      - 「达海美食怎么样」→ 0 命中；
+      - 「小意司日料」→ 名字对得上，但它是外卖店，被场景互斥排掉，最后跑去联网
+        匹配到一家美容院。
+    用户点名某家店时，正确行为是直接把这家店的事实返回。
+    """
+    q = _strip_question(query)
+    if len(q) < 2:
+        return []
+    hits: List[Dict[str, Any]] = []
+    for p in _all_places():
+        name = str(p.get("名称") or p.get("店名") or p.get("窗口名") or "")
+        if not name:
+            continue
+        # 短名（2 字）只认全等，避免「美食」这类通用词把半个库捞出来
+        exact = name == q
+        contains = len(q) >= 3 and (name in q or q in name)
+        if exact or contains:
+            hits.append(p)
+    hits.sort(key=lambda p: (
+        0 if str(p.get("名称") or p.get("店名") or p.get("窗口名")) == q else 1,
+        len(str(p.get("名称") or p.get("店名") or p.get("窗口名"))),
+    ))
+    return hits[:3]
+
 
 
 def _all_places() -> List[Dict[str, Any]]:
@@ -189,7 +237,12 @@ def food_search(
 
     places = _all_places()
     terms = _taste_terms(taste)
-    hits = [p for p in places if _match(p, query, terms, budget_max, max_minutes)]
+
+    # 用户点名某一家店（「达海美食怎么样」「小意司日料多少钱」）：
+    # 直接返回这家店的事实，不走品类筛选，也不受场景互斥影响。
+    named = _match_store_by_name(query)
+
+    hits = named or [p for p in places if _match(p, query, terms, budget_max, max_minutes)]
     taste_relaxed = ""
     if not hits and terms:
         # 口味词把结果全灭了：多半是模型自己加的口味（用户原话里并没有），
@@ -204,7 +257,7 @@ def food_search(
             int(p.get("直线距离_米") or 99999),
             -float(p.get("学生评分", 0) or 0),
         ))
-    else:
+    elif not named:
         hits.sort(key=lambda p: (-float(p.get("学生评分", 0) or 0), int(p.get("交通", {}).get("步行", 0) or 0)))
 
     # ---- ① 本地有匹配：只返回本地结果，不消耗地图额度 ----
@@ -219,6 +272,14 @@ def food_search(
         return json.dumps(
             {
                 **({"口味说明": taste_relaxed} if taste_relaxed else {}),
+                **(
+                    {
+                        "匹配方式": "按店名命中：用户问的是这一家店，直接用知识库记录回答，"
+                        "只讲这里有的字段，没写的（菜品细节、环境、营业时间）不要编"
+                    }
+                    if named
+                    else {}
+                ),
                 "结果": [
                     {
                         "名称": p.get("名称") or p.get("店名") or p.get("窗口名"),
@@ -236,6 +297,7 @@ def food_search(
                         "一句话点评": p.get("一句话点评"),
                         "可外卖": p.get("可外卖"),
                         "平均配送分钟": p.get("平均配送分钟"),
+                        "下单方式": p.get("下单方式"),
                         "uid": p.get("地图uid"),
                         "坐标": p.get("坐标"),
                         "来源": "知识库",
@@ -282,11 +344,62 @@ def food_search(
             out["联网检索"] += "（联网结果未按预算/步行筛选，请按需 verify_route 核实后再推荐）"
         return json.dumps(out, ensure_ascii=False)
 
+    # ---- ②.5 本地其实有，只是被预算/时间筛掉了：把差在哪、放宽多少说清楚 ----
+    # 用户看到「查不到」时最需要知道的是「放宽哪个条件就能吃上」，
+    # 而不是一句「可放宽口味/预算/时间约束」的套话。
+    relaxed: Dict[str, Any] = {}
+    if budget_max is not None:
+        wider_budget = [p for p in places if _match(p, query, terms, None, max_minutes)]
+        if wider_budget:
+            wider_budget.sort(key=lambda p: float(p.get("人均", 0) or 0))
+            relaxed["放宽预算"] = [
+                f"{p.get('名称') or p.get('店名')}（人均{p.get('人均')}元，超出上限{budget_max:g}元）"
+                for p in wider_budget[:3]
+            ]
+    if max_minutes is not None:
+        wider_time = [p for p in places if _match(p, query, terms, budget_max, None)]
+        if wider_time:
+            wider_time.sort(key=lambda p: int((p.get("交通") or {}).get("步行", 999) or 999))
+            relaxed["放宽时间"] = [
+                f"{p.get('名称') or p.get('店名')}（步行{(p.get('交通') or {}).get('步行')}分钟，超出上限{max_minutes}分钟）"
+                for p in wider_time[:3]
+            ]
+    if relaxed:
+        relaxed["要求"] = (
+            "这些店在本地知识库里确实存在，只是超出了用户设的预算/时间上限；"
+            "只能作为「放宽条件后可以去」的替代方案说明，不要说成符合条件，也别说成没有这家店。"
+        )
+
+    # 场景互斥会把外卖店挡在堂食结果之外：用户问「肠粉」时，外卖库里的普宁肠粉不会出现。
+    # 这里补一句提示，让模型知道「不是没有，是场景没对上」。
+    delivery_hits: List[str] = []
+    if query and query not in {"外卖", "外卖推荐", "聚餐", "聚会"}:
+        for item in _load(config.DELIVERY_PATH):
+            hay = " ".join(str(item.get(f, "")) for f in ("店名", "菜系", "一句话点评"))
+            hay += " " + " ".join(str(x) for x in item.get("招牌菜") or [])
+            if query in hay:
+                name = str(item.get("店名") or "")
+                if name:
+                    delivery_hits.append(name)
+    if delivery_hits:
+        relaxed["外卖库里有"] = (
+            f"「{query}」在外卖库有：{'、'.join(delivery_hits[:3])}。"
+            "注意：这些是**外卖店**，不是步行可达的堂食，别把它们说成「符合时间的堂食」。"
+            "用户能接受外卖时，用 query=外卖 重新检索一次、拿全字段再走 format_recommendation 出卡片；"
+            "用户坚持堂食就如实说这个时间范围内没有匹配，禁止声称「知识库里其实有符合条件的店」。"
+        )
+
     # ---- ③ 两边都没有：如实说明 ----
     out = {"结果": []}
+    out.update(relaxed)
     if online_note is not None:
         out["联网检索"] = online_note
-        out["建议"] = "本地知识库无匹配，联网检索暂不可用；可放宽口味/预算/时间约束稍后再试"
+        out["建议"] = (
+            "先按「放宽预算/放宽时间/外卖库里有」这些字段回答用户——本地确实有相关的店，"
+            "只是被条件或场景筛掉了；联网额度恢复后再补充更远的门店"
+            if relaxed
+            else "本地知识库无匹配，联网检索暂不可用；可放宽口味/预算/时间约束稍后再试"
+        )
     elif online_kw:
         out["提示"] = f"本地知识库与联网检索均无「{online_kw}」匹配"
         out["建议"] = "可放宽口味/预算/时间约束，或用 search_poi 换品类词重查"
