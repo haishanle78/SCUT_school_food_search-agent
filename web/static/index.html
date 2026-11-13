@@ -22,7 +22,10 @@
     font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
     background: var(--bg);
     color: var(--text);
+    /* 手机浏览器地址栏会吃掉 vh 的高度，100dvh 才是真实可视高度；
+       否则底部输入框会被裁到屏幕外，看起来就像「上方挡住下方」 */
     height: 100vh;
+    height: 100dvh;
     display: flex;
     justify-content: center;
   }
@@ -223,7 +226,7 @@
   .typing span:nth-child(3) { animation-delay: 0.3s; }
   @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-6px); opacity: 1; } }
   /* ---------- 快捷提问 ---------- */
-  .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 20px 10px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; flex: 1; }
   .chip {
     font-size: 12.5px;
     padding: 7px 14px;
@@ -296,7 +299,37 @@
   .profile-item .v { flex: 1; line-height: 1.6; }
   .modal .close-tip { margin-top: 14px; font-size: 12px; color: var(--text-soft); text-align: center; }
   /* ---------- 视图切换 ---------- */
-  .tabs { display: flex; gap: 4px; padding: 10px 20px 0; background: #fffdfb; }
+  .tabs { display: flex; gap: 4px; padding: 10px 20px 0; background: #fffdfb; align-items: center; }
+  .tabs-spacer { flex: 1; }
+  /* 折叠开关：手机屏幕小，筛选栏和快捷气泡常驻会把对话区挤得只剩一条缝 */
+  .mini-toggle {
+    font-size: 12px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text-soft);
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+  }
+  .mini-toggle.on { border-color: var(--accent); color: var(--accent-deep); background: var(--accent-soft); }
+  .filters.collapsed { display: none; }
+  .chips-bar.collapsed { display: none; }
+  .chips-bar { display: flex; align-items: flex-start; gap: 2px; padding: 0 14px 10px 20px; }
+  .chips-close {
+    flex-shrink: 0;
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text-soft);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    margin-top: 2px;
+  }
+  .chips-close:hover { border-color: var(--accent); color: var(--accent-deep); }
   .tab {
     font-size: 13px;
     padding: 8px 16px;
@@ -420,6 +453,10 @@
   <nav class="tabs">
     <button class="tab active" data-view="chat">AI 推荐</button>
     <button class="tab" data-view="kb">浏览检索</button>
+    <span class="tabs-spacer"></span>
+    <!-- 两个开关：屏幕小的时候可以把筛选栏和快捷提问收起来，把空间还给对话 -->
+    <button class="mini-toggle" id="filter-toggle" title="显示/隐藏条件筛选">筛选</button>
+    <button class="mini-toggle" id="chips-toggle" title="显示/隐藏快捷提问">快捷</button>
   </nav>
 
   <div class="view active" id="view-chat">
@@ -447,7 +484,10 @@
 
   <div class="chat" id="chat"></div>
 
-  <div class="chips" id="chips"></div>
+  <div class="chips-bar" id="chips-bar">
+    <div class="chips" id="chips"></div>
+    <button class="chips-close" id="chips-close" title="收起快捷提问">×</button>
+  </div>
 
   <div class="input-bar">
     <input id="input" type="text" placeholder="说说你想吃什么：口味 / 预算 / 有多懒…" autocomplete="off">
@@ -832,6 +872,40 @@ QUICK_PROMPTS.forEach((q) => {
   chipsBox.appendChild(chip);
 });
 
+/* ---------- 折叠：筛选栏 / 快捷提问 ----------
+   手机屏幕小，这两块常驻会把对话区挤成一条缝。给它们开关，
+   窄屏首次进入默认收起，宽屏默认展开；用户手动切过就记住选择。 */
+const filtersBox = document.querySelector(".filters");
+const chipsBar = document.getElementById("chips-bar");
+const filterToggle = document.getElementById("filter-toggle");
+const chipsToggle = document.getElementById("chips-toggle");
+const chipsClose = document.getElementById("chips-close");
+
+function applyPanel(which, hidden) {
+  const isFilter = which === "filter";
+  const box = isFilter ? filtersBox : chipsBar;
+  const btn = isFilter ? filterToggle : chipsToggle;
+  if (!box || !btn) return;
+  box.classList.toggle("collapsed", hidden);
+  // 收起时按钮高亮，表示「这里有内容，点一下能打开」
+  btn.classList.toggle("on", hidden);
+  localStorage.setItem("hide_" + which, hidden ? "1" : "0");
+}
+
+function initPanel(which) {
+  const saved = localStorage.getItem("hide_" + which);
+  const narrow = window.innerWidth < 700;
+  const hidden = saved === null ? narrow : saved === "1";
+  applyPanel(which, hidden);
+}
+
+initPanel("filter");
+initPanel("chips");
+
+filterToggle.onclick = () => applyPanel("filter", !filtersBox.classList.contains("collapsed"));
+chipsToggle.onclick = () => applyPanel("chips", !chipsBar.classList.contains("collapsed"));
+chipsClose.onclick = () => applyPanel("chips", true);
+
 /* ---------- 知识库检索页（只读本地索引，不消耗大模型与地图额度） ---------- */
 const KB = { q: "", scene: "", price: "", walk: "", tag: "", sort: "relevance", loaded: false };
 const KB_CHIPS = [
@@ -1000,6 +1074,12 @@ function switchView(view) {
   document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   document.getElementById("view-chat").classList.toggle("active", view === "chat");
   document.getElementById("view-kb").classList.toggle("active", view === "kb");
+  // 筛选/快捷开关只对「AI 推荐」页有意义，切到检索页就收起来，别占地方
+  const chatOnly = view === "chat";
+  ["filter-toggle", "chips-toggle"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = chatOnly ? "" : "none";
+  });
   /* 视图写进 hash：检索页可以直接分享链接 #kb */
   if (view === "kb" && location.hash !== "#kb") history.replaceState(null, "", "#kb");
   if (view === "chat" && location.hash === "#kb") history.replaceState(null, "", location.pathname + location.search);
