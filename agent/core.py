@@ -136,6 +136,7 @@ class FoodAdvisorAgent:
     _format_attempted: bool = False   # 本轮是否已调用过 format_recommendation
     _used_food_search: bool = False   # 本轮是否成功调用过 food_search
     _turn_user_input: str = ""        # 本轮用户原话（约束只认它，不认历史）
+    _route_tool_used: bool = False    # 本轮是否已算过路线（plan_route / verify_route）
 
     def set_origin(self, origin_key: str) -> None:
         """切换出发点：路线事实按起点分别记录，切换后旧路线自动作废。"""
@@ -159,6 +160,7 @@ class FoodAdvisorAgent:
         self._format_attempted = False
         self._used_food_search = False
         self._turn_user_input = user_input or ""
+        self._route_tool_used = False
         self._needed_modes = self._detect_modes(user_input)
         set_origin(self.origin)
         # 每轮刷新 system prompt（画像可能上一轮刚被工具更新过）
@@ -504,9 +506,14 @@ class FoodAdvisorAgent:
     _STORE_ASK_RE = re.compile(
         r"(怎么样|好不好吃|好吃吗|好吃不|如何|介绍|评价|口碑|在哪|怎么走|怎么去|几点|人均|多少钱|值得|靠谱|推荐吗)"
     )
-    # 餐饮语境词：把「今天天气怎么样」这类提问挡在门店咨询之外
+    # 路线意图：问到了就得真算，不能只把地址丢给用户
+    _ROUTE_ASK_RE = re.compile(r"(怎么去|怎么走|咋去|多远|多久到|要多久|路线|导航)")
+    # 餐饮语境词：把「今天天气怎么样」这类提问挡在门店咨询之外。
+    # 后半段是踩过的坑：「寿司郎怎么样」里没有「吃/店/餐」，模型直接回
+    # 「建议你看大众点评」，一次工具都不调——日料/快餐/饮品的词必须收录。
     _FOOD_CTX_RE = re.compile(
-        r"(吃|餐|美食|菜|饭|粉|面|粥|饺|茶|咖|烧烤|火锅|店|馆|窗口|食堂|外卖|小吃|甜品|食|料)"
+        r"(吃|餐|美食|菜|饭|粉|面|粥|饺|茶|咖|烧烤|火锅|店|馆|窗口|食堂|外卖|小吃|甜品|食|料"
+        r"|寿司|刺身|天妇罗|居酒屋|烧肉|拉面|咖喱|汉堡|披萨|炸鸡|奶茶|椰子鸡|酸菜鱼|烤冷面|木桶饭)"
     )
 
     def _is_empty_promise(self, content: str, used_tools: int) -> bool:
@@ -531,6 +538,14 @@ class FoodAdvisorAgent:
                       本校区自有语料模型不可能凭记忆知道，必须先查。
         """
         if used_tools or self.last_cards:
+            # 例外：用户问「怎么去/多远」，却只查了门店身份没算路线
+            # （find_restaurant 只证明店在哪儿，证明不了走过去要多久）。
+            if (
+                not self.last_cards
+                and not self._route_tool_used
+                and self._ROUTE_ASK_RE.search(user_input)
+            ):
+                return "route"
             return ""
         text = (content or "").strip()
         if not text:
@@ -576,6 +591,13 @@ class FoodAdvisorAgent:
             "回答只能使用工具返回的字段：库里没有写的菜名、环境、营业时间一律不要编，"
             "可以说「资料里没提到」。只有工具明确返回「无匹配」时，才可以如实说查不到，"
             "并且要说明是查过之后没查到。）"
+        ),
+        "route": (
+            "（系统提醒：用户问的是「怎么去 / 多远 / 多久」，但这一轮你还没算过路线。"
+            "find_restaurant 只告诉你店在哪儿，回答不了「走过去要多久」。"
+            "现在立刻调 verify_route(uid, mode='walking')（用户说骑行/打车才换 mode），"
+            "拿到真实耗时和距离再回答。禁止反问用户「要步行还是骑行」——默认就是步行，"
+            "也不要报你估算的时间，一切以工具返回为准。）"
         ),
     }
 
@@ -671,6 +693,8 @@ class FoodAdvisorAgent:
             return json.dumps({"error": f"工具执行失败: {exc}，请调整参数或改用其他工具"}, ensure_ascii=False)
         if tc.name == "food_search":
             self._used_food_search = True
+        if tc.name in {"plan_route", "verify_route"}:
+            self._route_tool_used = True
         if tc.name == "format_recommendation":
             # 截获结构化推荐 → 注入后端事实 + 硬校验 → 生成卡片
             args = tc.parse_arguments()
@@ -680,12 +704,22 @@ class FoodAdvisorAgent:
                 self.last_cards = self._inject_card_facts(recs)
                 self.last_summary = str(args.get("summary") or "")
                 if not self.last_cards:
+                    # 身份和路线都核实过，只是超出 3 公里推荐范围：这些事实照样能答用户
+                    # （「在哪、多远、走过去多久」），不能因为没出卡片就说「无法推荐」。
+                    verified = [
+                        {"名称": poi.get("名称"), "地址": poi.get("地址"), "路线": poi.get("路线") or {}}
+                        for poi in self.poi_store.values()
+                        if poi.get("路线")
+                    ]
                     return json.dumps(
                         {
                             "error": "所有推荐条目都未通过校验（门店身份/餐饮类型/范围/路线核实）",
                             "剔除明细": self.last_dropped,
-                            "要求": "必须先 search_poi 或 find_restaurant 拿 uid，再 verify_route 核实路线，然后才能推荐；"
-                                    "如果确实没有合规的店，就如实告诉用户没有匹配，不要硬凑。",
+                            "已核实的门店事实": verified,
+                            "要求": "必须先 search_poi 或 find_restaurant 拿 uid，再 verify_route 核实路线，然后才能推荐。"
+                                    "如果被剔除的原因是「超出校区推荐范围」而用户本来就是在问这家店（点名问），"
+                                    "就用上面已核实的事实回答「在哪、多远、走过去多久」，不要说「无法推荐」；"
+                                    "只有在做附近泛推荐时，才如实说这个范围没有匹配，不要硬凑。",
                         },
                         ensure_ascii=False,
                     )

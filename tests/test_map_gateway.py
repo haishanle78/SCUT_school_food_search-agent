@@ -132,6 +132,13 @@ def test_specified_store_not_substituted():
     assert data3.get("坐标"), "kb_hit 应带坐标"
     ok("验收1/3 本地库已核实门店：kb_hit 短路联网")
 
+    # 带分店后缀的店：只说核心名也要能本地命中（「寿司郎」↔「寿司郎（番禺天河城）」）。
+    # 相似度算法对 3 字 vs 9 字只有 0.3，靠核心名匹配兜底，否则会白跑一次联网。
+    data4 = json.loads(rp.find_restaurant("寿司郎", poi_store={}))
+    assert data4["状态"] == "kb_hit", f"带分店后缀应核心名命中 kb_hit: {data4}"
+    assert "天河城" in str(data4.get("名称")), data4
+    ok("验收1/4 带分店后缀门店：只说核心名也能 kb_hit")
+
 
 # ---------- 验收3：限流/配额要如实说明，不能说门店不存在 ----------
 
