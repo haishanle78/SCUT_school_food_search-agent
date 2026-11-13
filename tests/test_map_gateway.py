@@ -20,6 +20,9 @@ import config
 
 config.MAP_ENABLED = True
 config.BAIDU_MAP_AK = config.BAIDU_MAP_AK or "test-ak"
+# 全程 mock 网络，不该受当天真实额度用尽的影响（否则跑一天演示后测试就挂了）
+config.MAP_DAILY_SEARCH = 10**6
+config.MAP_DAILY_ROUTE = 10**6
 
 from agent.core import FoodAdvisorAgent  # noqa: E402
 from agent.memory import ConversationMemory, UserProfile  # noqa: E402
@@ -89,11 +92,13 @@ def make_agent() -> FoodAdvisorAgent:
 # ---------- 验收1/2：指定店名不擅自替换 ----------
 
 def test_specified_store_not_substituted():
+    # 用不在本地知识库的店名，专测联网路径的附属设施防线
+    # （B记鱼粥现已本地命中 kb_hit 短路联网，不再适合当联网用例）
     def handler(path, params):
         query = params.get("query", "")
-        if "停车场" in query or "B记" in query:
+        if "停车场" in query or "Z记" in query:
             return gw.MapResult(gw.OK, payload={"status": 0, "results": [
-                poi("p1", "B记鱼粥-门前停车场", tag="停车场;停车位", address="荣华里-5号楼"),
+                poi("p1", "Z记鱼粥-门前停车场", tag="停车场;停车位", address="荣华里-5号楼"),
             ]})
         # 只有一家"相似但不同"的粥店
         return gw.MapResult(gw.OK, payload={"status": 0, "results": [
@@ -101,11 +106,11 @@ def test_specified_store_not_substituted():
         ]})
 
     with FakeTransport(handler):
-        data = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+        data = json.loads(rp.find_restaurant("Z记鱼粥", poi_store={}))
     assert data["状态"] == "auxiliary_only", f"停车场不应被当作门店: {data}"
     assert "停车场" in data["提示"] and "不能作为门店" in data["提示"]
-    assert data["uid" if "uid" in data else "店名"] == "B记鱼粥"
-    ok("验收1/2 只返回『B记鱼粥-门前停车场』时：不生成门店，如实说明并要地标")
+    assert data["uid" if "uid" in data else "店名"] == "Z记鱼粥"
+    ok("验收1/2 只返回『Z记鱼粥-门前停车场』时：不生成门店，如实说明并要地标")
 
     # 名称相近但不同：只能给候选，不能当答案
     def handler2(path, params):
@@ -114,12 +119,18 @@ def test_specified_store_not_substituted():
         ]})
 
     with FakeTransport(handler2):
-        data2 = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+        data2 = json.loads(rp.find_restaurant("Z记鱼粥", poi_store={}))
     assert data2["状态"] in ("uncertain", "no_result"), f"相似店不得直接认定为同一家: {data2}"
     assert data2["状态"] != "match", "相似店不能被判定为确认匹配"
     assert "不确定" in data2.get("提示", "") or "不能确认" in data2.get("提示", "")
-    assert "B记鱼粥" in json.dumps(data2, ensure_ascii=False)
+    assert "Z记鱼粥" in json.dumps(data2, ensure_ascii=False)
     ok("验收1 指定店名查不到时：不替换成恒源客家佬粥粉面，候选人需用户确认")
+
+    # 本地库已有核实坐标的店（B记鱼粥）应直接 kb_hit，短路联网
+    data3 = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+    assert data3["状态"] == "kb_hit", f"本地已核实的店应 kb_hit: {data3}"
+    assert data3.get("坐标"), "kb_hit 应带坐标"
+    ok("验收1/3 本地库已核实门店：kb_hit 短路联网")
 
 
 # ---------- 验收3：限流/配额要如实说明，不能说门店不存在 ----------
