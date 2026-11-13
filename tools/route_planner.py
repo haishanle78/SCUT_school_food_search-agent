@@ -386,6 +386,22 @@ def _name_similarity(a: str, b: str) -> float:
     return round(ratio, 3)
 
 
+def _core_name(text: str) -> str:
+    """去掉末尾的分店后缀：「寿司郎（番禺天河城）」→「寿司郎」。"""
+    m = re.match(r"^(.+?)\s*[（(][^）)]*[)）]\s*$", str(text or "").strip())
+    return (m.group(1) if m else str(text or "")).strip()
+
+
+def _same_core(a: str, b: str) -> bool:
+    """核心名相同（「寿司郎」↔「寿司郎（番禺天河城）」）。
+
+    相似度算不出来：3 个字对 9 个字只有 0.3 左右，带分店后缀的店全都过不了
+    0.9 的门槛，于是「寿司郎怎么样」被当成查不到，白跑一次联网。
+    """
+    ca, cb = _norm_name(_core_name(a)), _norm_name(_core_name(b))
+    return bool(ca) and len(ca) >= 2 and ca == cb
+
+
 def _kb_lookup(name: str) -> Optional[Dict[str, Any]]:
     """本地真实知识库里的门店（正式名称 + 已核实别名）。
 
@@ -397,6 +413,7 @@ def _kb_lookup(name: str) -> Optional[Dict[str, Any]]:
         (config.CANTEEN_PATH, "饭堂窗口"),
         (config.DELIVERY_PATH, "外卖"),
     )
+    core_hits: List[Dict[str, Any]] = []
     for path, kind in sources:
         for item in _load(path):
             official = item.get("正式名称") or item.get("名称") or item.get("店名") or item.get("窗口名") or ""
@@ -404,10 +421,24 @@ def _kb_lookup(name: str) -> Optional[Dict[str, Any]]:
             if isinstance(aliases, str):
                 aliases = [aliases]
             for candidate in [official, *aliases]:
-                if candidate and _name_similarity(name, candidate) >= 0.9:
+                if not candidate:
+                    continue
+                if _name_similarity(name, candidate) >= 0.9:
                     hit = dict(item)
                     hit.setdefault("类别", kind)
                     return hit
+                if _same_core(name, candidate):
+                    entry = {**item, "类别": item.get("类别") or kind}
+                    entry_name = entry.get("名称") or entry.get("店名") or entry.get("窗口名")
+                    if all(
+                        (h.get("名称") or h.get("店名") or h.get("窗口名")) != entry_name
+                        for h in core_hits
+                    ):
+                        core_hits.append(entry)
+    # 核心名匹配兜底：只在唯一时采信（库里有「太二（番禺天河城）」和「太二（保利）」时，
+    # 光说「太二」不能替用户选分店）
+    if len(core_hits) == 1:
+        return core_hits[0]
     return None
 
 

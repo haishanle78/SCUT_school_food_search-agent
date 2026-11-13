@@ -13,6 +13,7 @@ OpenAI chat/completions 协议的服务。
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib import error, request
@@ -135,13 +136,32 @@ class LLMClient:
             raise RuntimeError(f"LLM 网络异常: {exc}") from exc
 
     # ---- 协议解析 ----
+    # 模型偶尔把流式协议片段当正文吐出来：
+    #   {"index":0,"finish_reason":"tool_calls","delta":{"role":"assistant",...}}
+    # 这是它自己想要发起工具调用却写成了文本，用户不该看到这种原始 JSON。
+    _PROTOCOL_LEAK_RE = re.compile(
+        r'\{\s*"index"\s*:\s*\d+\s*,\s*"finish_reason"'
+        r'|"tool_calls"\s*:\s*\[\s*\{\s*"id"\s*:'
+    )
+
+    @classmethod
+    def _strip_protocol_leak(cls, content: str) -> str:
+        if not content:
+            return content
+        match = cls._PROTOCOL_LEAK_RE.search(content)
+        if not match:
+            return content
+        cut = content.rfind("{", 0, match.start() + 1)
+        cleaned = content[: cut if cut != -1 else match.start()]
+        return cleaned.rstrip(" \t\r\n{[,:\"")
+
     def _parse_response(self, result: Dict[str, Any]) -> AssistantMessage:
         try:
             msg = result["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"LLM 返回格式异常: {json.dumps(result, ensure_ascii=False)[:300]}") from exc
 
-        assistant = AssistantMessage(content=(msg.get("content") or "").strip())
+        assistant = AssistantMessage(content=self._strip_protocol_leak((msg.get("content") or "").strip()))
         for tc in msg.get("tool_calls") or []:
             try:
                 fn = tc["function"]

@@ -285,6 +285,21 @@ def test_refuse_no_false_positive() -> None:
         "门店咨询没查库就作答（哪怕答得像样）也要先查",
         agent._nudge_reason("达海美食人均 15 元，评分 4.5。", 0, "达海美食怎么样") == "refuse",
     )
+    # 店名里没有「吃/店/餐」的日料：只靠品类词表会漏，靠「寿司」这类词兜住
+    check(
+        "日料店名（不含吃/店/餐）也要触发",
+        agent._nudge_reason("寿司郎是日式餐厅，建议看大众点评。", 0, "寿司郎怎么样") == "refuse",
+    )
+    check("聊股票不被当成餐饮", agent._nudge_reason("这不好说。", 0, "这只股票怎么样") == "")
+
+    # 问「怎么去」却只查了店名：地址答不了「要走多久」，得催一次路线
+    agent._route_tool_used = False
+    check(
+        "问怎么去但没算路线要催",
+        agent._nudge_reason("寿司郎在番禺天河城B2层。", 1, "寿司郎怎么去") == "route",
+    )
+    agent._route_tool_used = True
+    check("算过路线就不催", agent._nudge_reason("步行约47分钟。", 2, "寿司郎怎么去") == "")
 
 
 if __name__ == "__main__":
