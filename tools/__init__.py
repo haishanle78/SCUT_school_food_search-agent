@@ -88,8 +88,13 @@ def build_registry(
     store = poi_store if poi_store is not None else {}
     functions: Registry = {
         "food_search": _adapt(
-            lambda query, taste="", budget_max=None, max_minutes=None: food_search(
-                query, taste=taste, budget_max=budget_max, max_minutes=max_minutes, poi_store=store
+            lambda query="", taste="", dining_mode="", budget_max=None, max_minutes=None: food_search(
+                query,
+                taste=taste,
+                dining_mode=dining_mode,
+                budget_max=budget_max,
+                max_minutes=max_minutes,
+                poi_store=store,
             )
         ),
         "plan_route": _adapt(plan_route),
@@ -115,16 +120,46 @@ def build_registry(
                     "用户问『附近吃什么/推荐餐厅/想吃X』时用这个工具即可，"
                     "它已经内置联网兜底——【不需要】再单独调 search_poi，"
                     "除非返回明确提示联网失败或需要换品类词重查。禁止编造门店。"
+                    "\n三个参数各管一件事，不要混用："
+                    "query 只放菜系/品类（汉堡、日料、粥、粤菜），"
+                    "taste 只放口味（辣、清淡、甜），"
+                    "dining_mode 只放用餐方式（外卖=delivery，到店=dine_in）。"
+                    "把『外卖』塞进 taste、或把『辣』塞进 query 都会导致检索方向错误。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "关键词：店名/菜系/菜品/场景（如'辣'、'聚餐'、'外卖'、'粉面'）"},
-                        "taste": {"type": "string", "description": "口味偏好，如：辣、清淡、甜"},
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "菜系/品类关键词：汉堡、日料、寿司、粥、粉面、粤菜、烧腊、川菜。"
+                                "只放『吃什么品类』，不要放口味词（辣/清淡）和场景词（外卖/聚餐）。"
+                                "不知道品类就留空，不要填『外卖』。"
+                            ),
+                        },
+                        "taste": {
+                            "type": "string",
+                            "description": (
+                                "口味偏好，只能填：辣、清淡、甜、重口、鲜。"
+                                "『外卖』不是口味，请放 dining_mode。"
+                            ),
+                        },
+                        "dining_mode": {
+                            "type": "string",
+                            "enum": ["delivery", "dine_in"],
+                            "description": (
+                                "本次用餐方式。用户说『外卖/送到宿舍/不想出门/点个XX』→ delivery；"
+                                "说『去店里/堂食/走过去』或没提→ dine_in。"
+                                "delivery 时不核实步行路线，配送能力/费用/时长无依据时标待确认。"
+                            ),
+                        },
                         "budget_max": {"type": "number", "description": "人均预算上限（元）"},
-                        "max_minutes": {"type": "integer", "description": "可接受的步行时间上限（分钟）"},
+                        "max_minutes": {
+                            "type": "integer",
+                            "description": "可接受的步行时间上限（分钟）；外卖场景下该参数无意义，不要传",
+                        },
                     },
-                    "required": ["query"],
+                    "required": [],
                 },
             },
         },
