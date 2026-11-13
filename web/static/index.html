@@ -559,8 +559,13 @@ function renderCards(cards, summary) {
     if (c.price_per_person != null) tags += '<span class="tag money">人均 ¥' + esc(String(c.price_per_person)) + (c.price_source === "模型预估" ? "（预估）" : "") + "</span>";
     else tags += '<span class="tag">人均待确认</span>';
     if (c.route_verified) tags += '<span class="tag good">路线已核实</span>';
-    if (t.delivery_min != null) tags += '<span class="tag">🛵 配送约 ' + esc(String(t.delivery_min)) + " 分钟</span>";
-    if (c.delivery_only) tags += '<span class="tag good">外卖店·无需步行</span>';
+    // 配送时长来自后端按直线距离估算，必须显式标「预估」，不能冒充商家承诺
+    if (t.delivery_min != null) tags += '<span class="tag">🛵 配送约 ' + esc(String(t.delivery_min)) + " 分钟" + (t.delivery_eta_source ? "（预估）" : "") + "</span>";
+    if (c.delivery_only && !c.route_verified) tags += '<span class="tag">外卖配送·无需步行</span>';
+    // 地图搜到这家店 ≠ 确认它能送到：配送能力/费用没有依据时如实显示待确认
+    if (t["配送能力"]) tags += '<span class="tag ' + (t["配送能力"] === "待确认" ? "" : "good") + '">配送能力' + esc(String(t["配送能力"])) + "</span>";
+    if (t["配送费"] && t["配送费"] === "待确认") tags += '<span class="tag">配送费待确认</span>';
+    if (c.coordinate_pending) tags += '<span class="tag bad">位置待确认</span>';
     if (t.walk_min != null) tags += '<span class="tag">🚶 步行 ' + esc(String(t.walk_min)) + " 分钟</span>";
     if (t.ride_min != null) tags += '<span class="tag">🚲 骑行 ' + esc(String(t.ride_min)) + " 分钟</span>";
     if (t.taxi_min != null) tags += '<span class="tag">🚕 打车 ' + esc(String(t.taxi_min)) + " 分钟</span>";
@@ -589,7 +594,9 @@ function renderCards(cards, summary) {
       + '<div class="card-foot">'
       + (c.route_link
         ? '<a class="map-link" target="_blank" rel="noopener" href="' + esc(String(c.route_link)) + '">' + (c.delivery_only ? "🗺️ 地图位置（确认是哪家店）" : "🗺️ 官方路线（" + esc(String(c.origin || "校区")) + " → 这家店）") + "</a>"
-        : '<span class="delivery-flag">暂无法生成路线链接</span>')
+        : (c.coordinate_pending
+          ? '<span class="delivery-flag">位置待确认，暂不提供导航（不编造坐标）</span>'
+          : '<span class="delivery-flag">暂无法生成路线链接</span>'))
       + '<span class="delivery-flag">' + (c.delivery === true ? "懒得出门也能点" : (c.delivery === false ? "建议到店吃" : "外卖待确认")) + "</span></div>";
     wrap.appendChild(card);
   });
@@ -724,7 +731,7 @@ document.getElementById("filter-go").onclick = () => {
 /* 单次提问的超时：地图检索 + 逐家路线核实 + 模型生成，最长约 60s，留足余量 */
 const CHAT_TIMEOUT_MS = 90000;
 
-async function postChat(text, timeoutMs) {
+async function postChat(text, timeoutMs, requestId) {
   // AbortController 是这次修复的核心：没有它，服务重启后浏览器复用死连接会导致
   // fetch 永久挂起（不返回也不报错，界面一直转圈）
   const ctrl = new AbortController();
@@ -734,7 +741,9 @@ async function postChat(text, timeoutMs) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       cache: "no-store",
-      body: JSON.stringify(withSid({ message: text })),
+      // request_id 让「超时重试」变成同一次请求：后端命中就返回首次结果，
+      // 不会再跑一遍流程，也就不会重复扣模型/地图额度。
+      body: JSON.stringify(withSid({ message: text, request_id: requestId })),
       signal: ctrl.signal,
     });
     return { res, data: await res.json(), aborted: false };
@@ -743,6 +752,12 @@ async function postChat(text, timeoutMs) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/* 每个问题一个唯一标识；重试必须复用同一个，否则去重失效 */
+function newRequestId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
 }
 
 async function send() {
@@ -754,12 +769,16 @@ async function send() {
   addRow("user", "我").innerHTML = '<div class="bubble">' + esc(text) + "</div>";
   scrollBottom();
   const typingWrap = addRow("agent", "🦊");
+  // addRow 返回的是行内的 .bubble-wrap，不是整行。只删它会留下
+  // <div class="row agent"><div class="avatar">🦊</div></div>——就是一个孤零零的狐狸头像。
+  // 所以这里抓住整行，收尾时整行移除。
+  const typingRow = typingWrap.parentElement;
   typingWrap.innerHTML = '<div class="bubble"><div class="typing"><span></span><span></span><span></span></div></div>';
   scrollBottom();
 
   // 超过 15s 还没回，明确告诉用户在做什么，避免误以为卡死
   const slowTip = setTimeout(() => {
-    if (!typingWrap.isConnected) return;
+    if (!typingRow || !typingRow.isConnected) return;
     typingWrap.innerHTML =
       '<div class="bubble"><div class="typing"><span></span><span></span><span></span></div>' +
       '<div style="font-size:12px;opacity:.6;margin-top:6px">正在检索周边门店并核实路线，最多等 90 秒…</div></div>';
@@ -767,16 +786,19 @@ async function send() {
   }, 15000);
 
   try {
-    let out = await postChat(text, CHAT_TIMEOUT_MS);
+    // 同一个 requestId 贯穿首次请求与重试：后端据此只执行一次
+    const reqId = newRequestId();
+    let out = await postChat(text, CHAT_TIMEOUT_MS, reqId);
     // 死连接 / 冷启动 / 超时：自动重试一次（换一条新连接），用户无感
     if (!out.res) {
-      if (typingWrap.isConnected) {
+      if (typingRow && typingRow.isConnected) {
         typingWrap.innerHTML = '<div class="bubble">连接有点问题，正在自动重试一次…</div>';
       }
       await new Promise((r) => setTimeout(r, 1500));
-      out = await postChat(text, CHAT_TIMEOUT_MS);
+      out = await postChat(text, CHAT_TIMEOUT_MS, reqId);
     }
-    if (typingWrap.isConnected) typingWrap.remove();
+    // 整行移除：头像和气泡一起清掉，不留孤儿头像
+    if (typingRow && typingRow.isConnected) typingRow.remove();
     if (!out.res) {
       addAgentMessage(
         out.aborted
