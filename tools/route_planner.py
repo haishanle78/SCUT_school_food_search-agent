@@ -33,6 +33,9 @@ from tools.food_search import _load
 
 RADIUS_M = 3000            # 「附近推荐」检索半径（米）
 RADIUS_TOLERANCE_M = 3200  # 后端复核容差（直线距离略大于路网属正常）
+# 给知识库缺坐标的店补坐标时的最大距离：超过这个数几乎肯定是同名的另一家店，
+# 补上去会把学生导到十几公里外。宁可不补，标「位置待确认」。
+MAX_COORD_FILL_M = 8000
 ORIGIN_NAME = config.origin_by_key(config.DEFAULT_ORIGIN)["name"]  # 兼容旧引用
 
 MODE_LABEL = {"walking": "步行", "riding": "骑行", "driving": "打车"}
@@ -463,19 +466,32 @@ def _coord_from_suggestion(name: str) -> Optional[Dict[str, Any]]:
     本地知识库的坐标是人工整理的，缺坐标很常见（B记鱼粥就是这样）。
     以前缺坐标就直接收工，只能告诉用户「位置待确认」——但地图其实有这家店，
     只是 place/v2/search 搜不到。这里用 suggestion 试一次，补上就能正常导航。
+
+    必须按「离校区最近」挑，不能取第一条：实测「赛百味」第一条是越秀区
+    19 公里外的店，「南村木桶饭」第一条是荔湾区的另一家木桶饭——
+    配错位置比没有位置更糟，用户会按着导航跑到完全不相干的地方去。
     """
     target = (name or "").strip()
     if not target:
         return None
+    best: Optional[Dict[str, Any]] = None
     for raw in _suggestion_query(target):
         poi = _normalize_suggestion(raw)
         if not poi or poi.get("是餐饮") is False:
             continue
         poi_name = str(poi.get("名称") or "")
         # 名称互相包含即视为同一家（"B记鱼粥" ⊂ "广州市·B记鱼粥"）
-        if target in poi_name or poi_name in target or _name_similarity(target, poi_name) >= 0.6:
-            return poi
-    return None
+        if not (target in poi_name or poi_name in target or _name_similarity(target, poi_name) >= 0.6):
+            continue
+        if best is None or poi.get("直线距离_米", 1e9) < best.get("直线距离_米", 1e9):
+            best = poi
+    if best is None:
+        return None
+    # 最近的候选都在 15 公里外：几乎肯定是同名/异地的另一家店，
+    # 宁可继续标「位置待确认」，也不要给一个会把人导到天河去的坐标。
+    if float(best.get("直线距离_米") or 1e9) > MAX_COORD_FILL_M:
+        return None
+    return best
 
 
 def find_restaurant(

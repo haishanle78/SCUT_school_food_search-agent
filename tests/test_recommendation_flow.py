@@ -561,6 +561,57 @@ def test_kb_missing_coord_filled_by_suggestion() -> None:
         rp.gw._do_http = original_http
 
 
+def test_coord_fill_prefers_nearest() -> None:
+    print("[18] 补坐标必须选最近的一家：同名异地店不能把学生导到十几公里外")
+    import tools.route_planner as rp
+
+    far = {
+        "name": "潮埕汕头牛丸火锅", "uid": "far_tc",
+        "location": {"lat": 23.130, "lng": 113.320},   # 天河，约 15 公里
+        "province": "广东省", "city": "广州市", "district": "天河区",
+        "address": "天河南街道体育西横街45号", "tag": "火锅",
+    }
+    near = {
+        "name": "潮埕汕头牛丸火锅(南村店)", "uid": "near_tc",
+        "location": {"lat": 23.0133, "lng": 113.4100},  # 南村，约 2 公里
+        "province": "广东省", "city": "广州市", "district": "番禺区",
+        "address": "南村镇文明路", "tag": "火锅",
+    }
+
+    def fake_http(path, params, ak=None):
+        # 接口把「天河那家」排在前面，模拟真实返回顺序
+        return rp.gw.MapResult(rp.gw.OK, payload={"result": [far, near]})
+
+    original = rp.gw._do_http
+    rp.gw._do_http = fake_http
+    try:
+        poi = rp._coord_from_suggestion("潮埕")
+        check("补到的是南村店", poi and "南村" in poi["名称"], str(poi and poi["名称"]))
+        check("距离在合理范围内", poi and poi["直线距离_米"] < 5000, str(poi and poi["直线距离_米"]))
+        check("没有采用第一条（天河）", poi and poi["uid"] == "near_tc", str(poi and poi["uid"]))
+    finally:
+        rp.gw._do_http = original
+
+    # 只有远处同名店时，宁可不补，也不能给一个会误导人的坐标
+    # （换一个没被缓存过的店名，否则会命中上一步的缓存结果）
+    far_only = {
+        "name": "远香居(天河店)", "uid": "far_only",
+        "location": {"lat": 23.135, "lng": 113.325},
+        "province": "广东省", "city": "广州市", "district": "天河区",
+        "address": "天河区体育西路", "tag": "中餐馆",
+    }
+
+    def only_far(path, params, ak=None):
+        return rp.gw.MapResult(rp.gw.OK, payload={"result": [far_only]})
+
+    rp.gw._do_http = only_far
+    try:
+        poi2 = rp._coord_from_suggestion("远香居")
+        check("超 8 公里不补（宁可位置待确认）", poi2 is None, str(poi2))
+    finally:
+        rp.gw._do_http = original
+
+
 if __name__ == "__main__":
     test_japanese_delivery_cards()
     test_burger_delivery_params()
@@ -579,5 +630,6 @@ if __name__ == "__main__":
     test_find_restaurant_confidence()
     test_suggestion_fallback_finds_missing_shop()
     test_kb_missing_coord_filled_by_suggestion()
+    test_coord_fill_prefers_nearest()
     print(f"\n通过 {PASSED} 项" + ("" if not FAILED else f"，失败 {len(FAILED)} 项：{FAILED}"))
     raise SystemExit(0 if not FAILED else 1)
