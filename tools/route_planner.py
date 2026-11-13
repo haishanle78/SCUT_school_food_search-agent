@@ -208,7 +208,8 @@ def search_poi(
     store = poi_store if poi_store is not None else {}
     if not config.MAP_ENABLED:
         return json.dumps(
-            {"提示": "未配置百度地图 AK，无法联网检索真实门店", "建议": "在 .env 中填写 BAIDU_MAP_AK"},
+            {"提示": "未配置百度地图 AK，无法联网检索真实门店",
+             "建议": "在 .env 中填写 BAIDU_MAP_AKS（单把也可写成 BAIDU_MAP_AK）"},
             ensure_ascii=False,
         )
 

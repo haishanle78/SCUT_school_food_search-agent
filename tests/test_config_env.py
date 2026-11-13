@@ -147,6 +147,63 @@ def test_both_pools_declared_same_file():
     ok(f"凭据池已装配：LLM Key {len(llm)} 把 / 地图 AK {len(aks)} 把")
 
 
+def test_pool_dedup_and_cleaning():
+    """池解析必须去重保序、容忍空格/引号/空项/末尾逗号。
+
+    为什么去重是硬要求：同一把 Key 占多个槽位会绕过「单 Key 并发上限」，
+    等于自己把并发打上去，反而更容易被上游 429；重复 AK 同理会让日配额
+    被重复计算，实际上限不会翻倍。
+    """
+    assert config._split_pool("k1,k1,k2,k2") == ["k1", "k2"]
+    assert config._split_pool(" k1 , , k2 ,, k3 ") == ["k1", "k2", "k3"]
+    assert config._split_pool("k1,k2,") == ["k1", "k2"]
+    assert config._split_pool("") == []
+    assert config._split_pool('"k1",\'k2\'') == ["k1", "k2"]
+    # 顺序必须保留（第一个出现位置代表该 Key，池子轮询依赖这个顺序）
+    assert config._split_pool("z,a,m") == ["z", "a", "m"]
+    ok("凭据池去重保序，空格/引号/空项/末尾逗号均被清洗")
+
+
+def test_multiline_misformat_detected():
+    """回归：多行填写会被 dotenv 静默丢弃，必须能报出来。
+
+    用户很容易把 4 把 Key 写成 4 行，标准 dotenv 只认第一行，
+    后 3 行变成"孤行"被忽略——没有任何报错，池子悄悄只剩 1 把。
+    """
+    import tempfile
+
+    fd, path = tempfile.mkstemp(suffix=".env")
+    os.close(fd)
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "LLM_PROVIDER=openai\n"
+                "OPENAI_API_KEYS=aaaaaaaaaaaaaaaaaaaaaa\n"
+                "bbbbbbbbbbbbbbbbbbbbbb\n"          # 第 3 行：被丢弃的孤行
+                "cccccccccccccccccccccc\n"          # 第 4 行：被丢弃的孤行
+                "# 这是注释，不该报\n"
+                "LLM_MODEL=glm-4-flash\n"
+            )
+        warns = config._suspicious_env_lines(path)
+        assert len(warns) == 2, f"应报出 2 条孤行，实际 {warns}"
+        assert "第 3 行" in warns[0] and "第 4 行" in warns[1], warns
+        ok("多行误填能被检测（不会静默丢 Key）")
+    finally:
+        os.unlink(path)
+
+
+def test_credentials_summary_never_leaks():
+    """自检摘要只能出现打码后的凭据，绝不包含明文。"""
+    summary = config.describe_credentials()
+    assert set(summary) == {"config_source", "llm", "map", "warnings"}, summary.keys()
+    for secret in config.LLM_KEYS + config.BAIDU_MAP_AKS:
+        text = repr(summary)
+        assert secret not in text, "摘要里出现了凭据明文！"
+    assert summary["llm"]["keys"] == len(config.LLM_KEYS)
+    assert summary["map"]["aks"] == len(config.BAIDU_MAP_AKS)
+    ok("凭据摘要已打码，数量与真实池一致")
+
+
 if __name__ == "__main__":
     test_inline_comment()
     test_quoted_hash_kept()
@@ -155,4 +212,7 @@ if __name__ == "__main__":
     test_multi_value_split()
     test_single_source_no_runtime_env()
     test_both_pools_declared_same_file()
+    test_pool_dedup_and_cleaning()
+    test_multiline_misformat_detected()
+    test_credentials_summary_never_leaks()
     print(f"=== 全部 {PASS} 项配置解析测试通过 ===")

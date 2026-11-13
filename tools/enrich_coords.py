@@ -227,7 +227,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if not config.MAP_ENABLED:
-        print("未配置百度地图 AK：请在 .env 里填写 BAIDU_MAP_AK 后重试。")
+        print("未配置百度地图 AK：请在 .env 里填写 BAIDU_MAP_AKS（单把也可写成 BAIDU_MAP_AK）后重试。")
         return 2
 
     targets = ["restaurants", "delivery", "canteen"] if args.target == "all" else [args.target]

@@ -208,7 +208,11 @@ def _translate(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _do_http(params: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     """真正发请求的地方（测试里会被替换）。返回 (统一状态, 百度原始响应)。"""
     query = dict(params)
-    query.update({"output": "json", "ak": config.BAIDU_MAP_AK})
+    # 天气接口复用地图 AK 池：优先用池里第一把，第一把被熔断/失效时自动换下一把。
+    # 天气额度与检索/路线相互独立，不占那两项的日配额。
+    pool = list(config.BAIDU_MAP_AKS) or ([config.BAIDU_MAP_AK] if config.BAIDU_MAP_AK else [])
+    ak = pool[0] if pool else ""
+    query.update({"output": "json", "ak": ak})
     url = f"https://api.map.baidu.com{API_PATH}?{urlencode(query)}"
     try:
         with urlrequest.urlopen(url, timeout=config.WEATHER_TIMEOUT) as resp:

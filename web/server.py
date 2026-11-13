@@ -184,7 +184,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {
                 "llm": config.LLM_ENABLED,
                 "llm_model": config.LLM_MODEL if config.LLM_ENABLED else "",
-                "llm_pool": get_pool().snapshot() if config.LLM_ENABLED else None,
                 "map": config.MAP_ENABLED,
                 "origin": f"{origin['name']}（{origin['coord']}）",
                 "build": BUILD["hash"],
@@ -197,6 +196,8 @@ class Handler(BaseHTTPRequestHandler):
                     "tool_calls_per_turn": config.MAX_TOOL_CALLS_PER_TURN,
                 },
                 "map_stats": map_gateway.snapshot(),
+                # 凭据装配摘要（全部打码）：几把 Key / 几把 AK / 有无填写警告
+                "credentials": config.describe_credentials(),
                 # 模型通道池（Key 打码）：能直接看到几把钥匙、是否在冷却
                 "llm_pool": get_pool().snapshot() if config.LLM_ENABLED else {"keys": 0},
             })
@@ -367,10 +368,20 @@ class Server(ThreadingHTTPServer):
 def main() -> None:
     port = int(os.getenv("PORT", "8787"))
     mode = "LLM 模式" if config.LLM_ENABLED else "离线模式"
+    cred = config.describe_credentials()
     print("=" * 56)
     print("  国际校区干饭军师 · 网页版已启动")
     print(f"  模式：{mode} | 百度地图：{'已连接' if config.MAP_ENABLED else '未配置'}")
     print(f"  端口：{port} | build：{BUILD['hash']} | 配置源：{config.CONFIG_SOURCE}")
+    # 凭据装配摘要：几把 Key、几把 AK，一眼核对（全部打码，不含明文）
+    print(f"  模型 Key：{cred['llm']['keys']} 把 {cred['llm']['masked']}"
+          f" | 并发 {cred['llm']['concurrency_total']} 路")
+    print(f"  地图 AK：{cred['map']['aks']} 把 {cred['map']['masked']}"
+          f" | 日额度 检索 {cred['map']['daily_search_total']} / 路线 {cred['map']['daily_route_total']}")
+    for warn in cred["warnings"]:
+        print(f"  [配置警告] 疑似多行填写被丢弃 → {warn}")
+    if cred["warnings"]:
+        print("             多把凭据必须用逗号写在同一行，不能换行分隔")
     print(f"  限制：{config.MAX_MESSAGE_CHARS} 字 / 每分钟 {config.CHAT_RATE_PER_MIN} 次 / 日 {config.CHAT_GLOBAL_DAILY} 次")
     print("  关闭服务：Ctrl+C")
     print("=" * 56)

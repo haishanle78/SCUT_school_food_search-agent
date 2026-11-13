@@ -1,4 +1,7 @@
-"""全局配置：从 .env 与默认值加载。"""
+"""全局配置：从 .env 与默认值加载。
+
+唯一配置源：进程环境变量 > .env > 代码默认值。没有第二层覆盖文件。
+"""
 
 from __future__ import annotations
 
@@ -58,8 +61,23 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip() or (
 LLM_TEMPERATURE = 0.4  # 推荐类任务要稳，别太发散
 
 # 多 Key 分流：逗号分隔。兼容旧的单 Key 变量（OPENAI_API_KEY / DEEPSEEK_API_KEY）。
+# 去重保序是硬要求：同一把 Key 若占了多个槽位，会绕过"单 Key 并发上限"的约束，
+# 等于自己把并发打高，反而更容易被上游 429。所以先按出现顺序去重再建池。
+def _split_pool(raw: str) -> list[str]:
+    """把逗号分隔的凭据串解析成去重列表；顺序保留（首个位置代表该 Key）。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw.split(","):
+        token = item.strip().strip('"').strip("'").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
 _keys_raw = os.getenv("OPENAI_API_KEYS", "") or os.getenv("DEEPSEEK_API_KEYS", "")
-LLM_KEYS = [k.strip() for k in _keys_raw.split(",") if k.strip()]
+LLM_KEYS = _split_pool(_keys_raw)
 if not LLM_KEYS and LLM_API_KEY and "在此填入" not in LLM_API_KEY:
     LLM_KEYS = [LLM_API_KEY]
 
@@ -78,10 +96,11 @@ TOOL_RESULT_MAX_CHARS = int(os.getenv("TOOL_RESULT_MAX_CHARS", "600"))     # 裁
 
 # ---------- 地图 ----------
 # 多 AK 分流：逗号分隔（每个 AK 需为服务端类型应用，不勾 SN 校验）。
-# 兼容旧的单 AK 变量 BAIDU_MAP_AK。
+# 兼容旧的单 AK 变量 BAIDU_MAP_AK。同样去重保序：重复 AK 会让日配额被重复计算，
+# 实际上限并不会翻倍，只会在"以为还有额度"时被打回配额耗尽。
 _aks_raw = os.getenv("BAIDU_MAP_AKS", "")
-BAIDU_MAP_AKS = [a.strip() for a in _aks_raw.split(",") if a.strip()]
-BAIDU_MAP_AK = os.getenv("BAIDU_MAP_AK", "").strip()
+BAIDU_MAP_AKS = _split_pool(_aks_raw)
+BAIDU_MAP_AK = os.getenv("BAIDU_MAP_AK", "").strip().strip('"').strip("'").strip()
 if not BAIDU_MAP_AKS and BAIDU_MAP_AK:
     BAIDU_MAP_AKS = [BAIDU_MAP_AK]
 if BAIDU_MAP_AKS and not BAIDU_MAP_AK:
@@ -168,3 +187,58 @@ MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "400"))       # 单条消
 CHAT_RATE_PER_MIN = int(os.getenv("CHAT_RATE_PER_MIN", "8"))         # 每会话每分钟提问上限
 CHAT_GLOBAL_DAILY = int(os.getenv("CHAT_GLOBAL_DAILY", "300"))       # 全站每日提问上限
 MAX_TOOL_CALLS_PER_TURN = int(os.getenv("MAX_TOOL_CALLS_PER_TURN", "10"))  # 单轮工具调用预算
+
+
+# ---------- 启动自检：把「填了什么、几把、有没有填错」讲清楚 ----------
+def _mask_secret(token: str) -> str:
+    """凭据打码：只留头尾，足够核对是否填对同一把，又不会泄露。"""
+    if len(token) <= 8:
+        return token[:2] + "***"
+    return token[:6] + "***" + token[-4:]
+
+
+def _suspicious_env_lines(path: str) -> list[str]:
+    """找出疑似「多行填写」造成的孤行。
+
+    标准 dotenv 不支持把一个变量拆成多行：写成
+        OPENAI_API_KEYS=key1
+        key2
+    时 key2 那行既没有 `=` 也不以 `#` 开头，会被静默丢弃。
+    这里把它揪出来，避免"以为填了 4 把、实际只生效 1 把"。
+    """
+    if not os.path.exists(path):
+        return []
+    found: list[str] = []
+    with open(path, "r", encoding="utf-8") as handle:
+        for lineno, raw in enumerate(handle, 1):
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" in line:
+                continue
+            if len(line) >= 16:  # 像一段凭据，而不是手误的零散字符
+                found.append(f"第 {lineno} 行: {line[:6]}...{line[-4:]}（{len(line)} 字符）")
+    return found
+
+
+def describe_credentials() -> dict:
+    """返回可安全打印的凭据装配摘要（绝不包含明文）。"""
+    env_path = os.path.join(BASE_DIR, ".env")
+    return {
+        "config_source": CONFIG_SOURCE,
+        "llm": {
+            "provider": LLM_PROVIDER or "(未设置)",
+            "model": LLM_MODEL,
+            "base_url": LLM_BASE_URL,
+            "enabled": LLM_ENABLED,
+            "keys": len(LLM_KEYS),
+            "concurrency_total": len(LLM_KEYS) * LLM_CONCURRENCY_PER_KEY,
+            "masked": [_mask_secret(k) for k in LLM_KEYS],
+        },
+        "map": {
+            "enabled": MAP_ENABLED,
+            "aks": len(BAIDU_MAP_AKS),
+            "masked": [_mask_secret(a) for a in BAIDU_MAP_AKS],
+            "daily_search_total": MAP_DAILY_SEARCH * max(1, len(BAIDU_MAP_AKS)),
+            "daily_route_total": MAP_DAILY_ROUTE * max(1, len(BAIDU_MAP_AKS)),
+        },
+        "warnings": _suspicious_env_lines(env_path),
+    }

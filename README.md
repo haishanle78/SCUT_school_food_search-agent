@@ -125,10 +125,13 @@ MAX_TOOL_CALLS_PER_TURN=10      # 单轮工具调用预算
 **怎么填（照做即可）**
 
 1. `cp .env.example .env`——`.env` 只在你本机存在，git 不跟踪，不进任何 PR。
-2. LLM：把 `OPENAI_API_KEYS=` 这行的 `#` 去掉，填真实 Key；只有 1 把就填 `OPENAI_API_KEYS=那一把`（与单 Key 写法等价）。
-3. 地图：把 `BAIDU_MAP_AKS=` 这行的 `#` 去掉，填真实 AK，同样逗号分隔。
-4. 其余参数**保持默认**。`LLM_CONCURRENCY_PER_KEY=2` 是免费档硬限制，调大会换来 429。
-5. 验证：启动后访问 `/api/status`，确认 `llm`、`map` 均为 `true`，`llm_pool.keys` 等于你填的 Key 数量，`map_stats.ak_usage` 里 AK 数量对得上。
+2. LLM：直接改 `OPENAI_API_KEYS=` 这一行，多把用**英文逗号**写在同一行（如 `k1,k2,k3,k4`）；只有 1 把就只写那一把。
+3. 地图：同样改 `BAIDU_MAP_AKS=` 这一行，逗号分隔。每个 AK 必须是**服务端**类型应用、**不勾 SN 校验**。
+4. 其余参数**保持默认**。免费档 `LLM_CONCURRENCY_PER_KEY` 建议 1~2，调大会换来 429。
+5. 验证：启动时终端会打印「模型 Key：N 把 / 地图 AK：N 把」（已打码），N 对不上就是填错了；也可访问 `/api/status` 看 `credentials` 字段。
+
+> **填写三不要**：不要换行分隔（第 2 行起会被静默丢弃）、不要用中文逗号（`，`）、不要重复填同一把（代码会去重，但说明你贴重了）。
+> 若真的写成多行，启动日志会打出 `[配置警告] 疑似多行填写被丢弃`。
 
 **密钥从哪来**
 
@@ -149,6 +152,7 @@ MAX_TOOL_CALLS_PER_TURN=10      # 单轮工具调用预算
 | 一直返回"当前提问的人较多" | 所有 Key 都在熔断中或排队超时 | 看 `/api/status` 的 `llm_pool`，多数是 Key 无效或并发被占满 |
 | 地图卡片全被剔除 | AK 配额用尽或类型不对（非服务端应用） | 看 `map_stats.ak_usage` 的熔断标记，换 AK 或改应用类型 |
 | 改了 `.env` 但不生效 | 进程已有同名环境变量时 `.env` 不会覆盖（`load_dotenv(override=False)`），或改完没重启 | 重启服务；Windows 下确认文件名是 `.env` 而非 `.env.txt` |
+| 填了 4 把却只生效 1 把 | 写成了多行，或用了中文逗号 | 看启动日志的「N 把」和 `[配置警告]`；改成英文逗号单行 |
 | 行尾注释导致启动报 `ValueError` | 旧版解析器不剥行尾 `#` | 已修复并有回归测试 `tests/test_config_env.py`；模板可放心带注释 |
 
 ---
