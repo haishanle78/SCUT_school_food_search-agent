@@ -51,6 +51,23 @@ def _with_mock(payload, calls):
     return fake
 
 
+class _empty_local:
+    """临时把本地知识库清空，稳定测「本地无匹配 → 联网」分支。
+
+    不能挑一个「当前知识库里没有的品类」来测：知识库是活的，
+    今天没有川菜、明天加了川菜，测试就会莫名其妙变成假失败。
+    """
+
+    def __enter__(self):
+        self._orig = fs._all_places
+        fs._all_places = lambda: []
+        return self
+
+    def __exit__(self, *exc):
+        fs._all_places = self._orig
+        return False
+
+
 def run(query: str, **kwargs) -> dict:
     return json.loads(fs.food_search(query, **kwargs))
 
@@ -96,17 +113,13 @@ def test_kb_miss_online_fallback() -> None:
     }
     rp.search_poi = _with_mock(online, calls)
     try:
-        data = run("川菜")
-        # 若知识库恰好有川菜门店则本组用例不适用，先探测
-        probe = run("面")
-        if data.get("结果"):
-            check("联网结果带 uid", all(i.get("uid") for i in data["结果"]))
-            check("来源标注为联网", all(i["来源"] == "联网（百度地图）" for i in data["结果"]))
-            check("发起了联网检索", len(calls) >= 1, str(calls))
-            check("返回包含联网说明", "联网" in str(data.get("联网检索", "")))
-        else:
-            # 知识库里没有川菜 → 应该走了联网；若联网被跳过说明有 bug
-            check("知识库无川菜时应联网", len(calls) >= 1, str(calls))
+        with _empty_local():
+            data = run("川菜")
+        # 本地库此刻为空，必然走联网；若没联网说明兜底链断了
+        check("知识库为空时应联网", len(calls) >= 1, str(calls))
+        check("联网结果带 uid", all(i.get("uid") for i in data.get("结果", [])))
+        check("来源标注为联网", all(i["来源"] == "联网（百度地图）" for i in data.get("结果", [])))
+        check("返回包含联网说明", "联网" in str(data.get("联网检索", "")))
     finally:
         rp.search_poi = original
 
@@ -117,7 +130,8 @@ def test_kb_miss_quota_note() -> None:
     original = rp.search_poi
     rp.search_poi = _with_mock({"状态": "quota_exhausted", "提示": "地图接口今日配额已用完"}, calls)
     try:
-        data = run("川菜")
+        with _empty_local():
+            data = run("川菜")
         check("结果为空", data.get("结果") == [])
         check("附带联网状态说明", "配额" in str(data.get("联网检索", "")), str(data))
     finally:
@@ -143,7 +157,8 @@ def test_exception_safe() -> None:
     original = rp.search_poi
     rp.search_poi = _with_mock(RuntimeError("network down"), calls)
     try:
-        data = run("川菜")
+        with _empty_local():
+            data = run("川菜")
         check("返回了合法 JSON 且结果为空", data.get("结果") == [])
         check("异常被捕获并说明", "异常" in str(data.get("联网检索", "")), str(data)[:120])
     finally:

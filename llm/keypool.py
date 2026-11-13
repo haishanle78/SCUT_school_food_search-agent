@@ -121,14 +121,20 @@ class KeyPool:
             slot.breaker_status = ""
 
     def mark_failure(self, slot: _Slot, exc: Exception) -> bool:
-        """按错误类型处理：限流/并发类 → 熔断该 Key 并返回 True（可换钥匙重试）。"""
+        """按错误类型处理：Key 自身的问题 → 熔断该 Key 并返回 True（可换钥匙重试）。
+
+        为什么 401/403 也要熔断：Key 失效（过期、填错、被禁用）和限流一样，
+        换一把就完全可能成功。早期只认 429/1214，导致池里只要有一把坏 Key，
+        轮到它就整轮失败 —— 用户看到的是「模型不可用，切离线兜底」，
+        而其实池子里还有好的钥匙没被用过。
+        """
         text = str(exc)
-        retryable = _looks_rate_limited(text)
-        if retryable:
-            with self._lock:
-                slot.breaker_until = time.time() + self._cooldown
-                slot.breaker_status = text[:120]
-        return retryable
+        if not _should_failover(text):
+            return False
+        with self._lock:
+            slot.breaker_until = time.time() + self._cooldown
+            slot.breaker_status = text[:120]
+        return True
 
     # ---------- 统计 ----------
     def snapshot(self) -> Dict[str, object]:
@@ -167,10 +173,29 @@ class KeyPool:
             slot.used = 0
 
 
-def _looks_rate_limited(text: str) -> bool:
-    """判断是否为「换一把 Key 有意义」的错误。"""
-    lowered = text.lower()
-    signals = ("429", "1214", "1302", "并发", "限流", "rate limit", "too many requests", "quota")
+def _should_failover(text: str) -> bool:
+    """判断这个错误是不是「换一把 Key 有意义」。
+
+    分三类：
+      1. 限流/配额类（429/1214）—— 换钥匙立刻能用；
+      2. 凭据类（401/403/invalid api key/令牌失效）—— 这把钥匙本身坏了，
+         换下一把是唯一出路，绝不能因为一把坏 Key 让整轮请求失败；
+      3. 模型/路径类（404 model not found）—— 换 Key 也一样，属于配置问题，
+         但熔断它没坏处，至少不会反复撞同一堵墙。
+
+    只有 400（请求体/参数错了）不换：那是我们自己发的内容有问题，
+    换多少把钥匙都会以同样方式失败。
+    """
+    lowered = (text or "").lower()
+    if "http 400" in lowered:
+        return False
+    signals = (
+        "429", "1214", "1302",                        # 限流/频率
+        "401", "403", "invalid api key", "invalid_api_key",
+        "令牌", "鉴权", "authentication", "unauthorized", "forbidden",
+        "404", "model_not_found", "模型不存在",
+        "并发", "限流", "rate limit", "too many requests", "quota",
+    )
     return any(sig in lowered for sig in signals)
 
 

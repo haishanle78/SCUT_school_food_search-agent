@@ -974,10 +974,16 @@ class FoodAdvisorAgent:
                     f"{dist_text}｜{eta_text}｜配送能力待确认｜{item.get('一句话点评', '')}"
                 )
             else:
-                walk = (item.get("交通") or {}).get("步行", "?")
+                walk = (item.get("交通") or {}).get("步行")
+                # 联网检索结果没有路线事实：不能写「步行?分钟」，那是残缺信息冒充事实
+                walk_text = f"步行{walk}分钟" if walk is not None else "路线待核实"
+                price = item.get("人均")
+                price_text = f"人均{price}元" if price is not None else "人均待确认"
+                rating = item.get("学生评分")
+                rating_text = f"｜评分{rating}" if rating is not None else ""
                 lines.append(
-                    f"{i}. {name}｜{item.get('菜系', '')}｜人均{item.get('人均', '?')}元｜"
-                    f"步行{walk}分钟｜评分{item.get('学生评分', '?')}｜{item.get('一句话点评', '')}"
+                    f"{i}. {name}｜{item.get('菜系', '')}｜{price_text}｜"
+                    f"{walk_text}{rating_text}｜{item.get('一句话点评', '')}"
                 )
         return "\n".join(lines)
 
@@ -995,8 +1001,16 @@ class FoodAdvisorAgent:
 
     @staticmethod
     def _parse_constraints(text: str):
-        """规则解析：没有 LLM 时也能从问句中抽取约束。"""
+        """规则解析：没有 LLM 时也能从问句中抽取约束。
+
+        这里最容易出错的是「把什么当成 query」：
+          query 必须是菜系/品类（日料、汉堡、粥），绝不能是口味（辣）或场景（外卖）。
+        早期版本把「外卖」和口味词都塞进 query，导致离线兜底时品类条件丢失，
+        问「有日料的外卖推荐吗」会返回一堆酸菜鱼、面馆。
+        """
         import re
+
+        from tools.food_search import detect_cuisine
 
         taste = ""
         for kw in ("辣", "清淡", "甜", "重口"):
@@ -1014,13 +1028,12 @@ class FoodAdvisorAgent:
         if m:
             minutes = int(m.group(1))
 
-        # 场景词不再伪装成 query：单独由 _detect_dining_mode 处理
+        # 场景词不再伪装成 query：用餐方式由 _detect_dining_mode 单独处理
         if "聚餐" in text or "聚会" in text:
             query = "聚餐"
-        elif taste:
-            query = taste
         else:
-            query = ""
+            # 认不出菜系就留空，让检索按其他条件走；绝不拿口味词顶替品类
+            query = detect_cuisine(text)
         return query, taste, budget, minutes
 
     def _weather_context(self) -> str:

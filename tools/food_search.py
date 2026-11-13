@@ -28,6 +28,67 @@ _SCENE_WORDS = {"外卖", "外卖推荐", "聚餐", "聚会"}
 _DELIVERY_WORDS = {"外卖", "外卖推荐", "delivery", "deliver", "takeout", "takeaway", "配送"}
 _DINE_IN_WORDS = {"堂食", "到店", "dine_in", "dinein", "in_store", "到店吃"}
 
+# 菜系/品类别名表：左边是检索用的标准词，右边是用户可能说的各种叫法。
+# 为什么需要它：离线兜底只能靠规则解析用户原话，之前只认「辣/清淡」这类口味词，
+# 完全没有菜系概念，于是「有日料的外卖推荐吗」解析出的 query 是空——
+# 没有品类条件，检索就直接返回全部外卖店（酸菜鱼、面馆），看着像乱推。
+CUISINE_ALIASES = (
+    ("日本料理", ("日料", "日本料理", "寿司", "刺身", "居酒屋", "日式", "鳗鱼")),
+    ("汉堡", ("汉堡", "漢堡", "burger")),
+    ("披萨", ("披萨", "比萨", "pizza")),
+    ("炸鸡", ("炸鸡",)),
+    ("烧烤", ("烧烤", "烤肉", "撸串")),
+    ("火锅", ("火锅", "打边炉")),
+    ("粥", ("粥", "砂锅粥")),
+    ("粉面", ("粉面", "面馆", "面条", "拉面", "米线", "米粉", "河粉", "云吞")),
+    ("粤菜", ("粤菜", "广东菜", "广府菜")),
+    ("湘菜", ("湘菜", "湖南菜")),
+    ("川菜", ("川菜", "四川菜", "酸菜鱼", "水煮")),
+    ("烧腊", ("烧腊", "烧鸭", "烧鹅", "叉烧")),
+    ("麻辣烫", ("麻辣烫", "冒菜")),
+    ("饺子", ("饺子", "水饺", "锅贴")),
+    ("奶茶", ("奶茶", "果茶")),
+    ("咖啡", ("咖啡",)),
+    ("快餐", ("快餐", "简餐", "便当")),
+    ("东南亚菜", ("泰国菜", "越南菜", "咖喱", "东南亚")),
+)
+
+
+def detect_cuisine(text: str) -> str:
+    """从用户原话里认出菜系/品类，返回检索用的标准词（认不出返回空串）。
+
+    只做「用户明确说了某品类」的识别，不猜、不扩展——
+    用户没提品类就让 query 为空，宁可多问一句，也不替他决定吃什么。
+    """
+    raw = (text or "").lower()
+    if not raw:
+        return ""
+    # 命中多个时取最先出现的那个，更符合用户语序里的重点
+    best, best_pos = "", len(raw)
+    for canonical, aliases in CUISINE_ALIASES:
+        for alias in aliases:
+            pos = raw.find(alias.lower())
+            if pos != -1 and pos < best_pos:
+                best, best_pos = canonical, pos
+    return best
+
+
+def expand_query_terms(query: str) -> list[str]:
+    """把 query 展开成同义组，用于本地知识库匹配。
+
+    知识库里可能写「日料」而标准词是「日本料理」，只认一种写法会漏掉大量记录。
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    terms = [q]
+    for canonical, aliases in CUISINE_ALIASES:
+        group = {canonical.lower(), *(a.lower() for a in aliases)}
+        if q in group:
+            terms = sorted(group)
+            break
+    return terms
+
 
 def normalize_dining_mode(value: str) -> str:
     """把各种口语/英文写法收敛成 delivery / dine_in / 空（未指定）。
@@ -184,10 +245,10 @@ def _match(
             str(item.get(field, ""))
             for field in ("名称", "店名", "窗口名", "菜系", "一句话点评", "口味标签")
         ) + " " + " ".join(str(x) for x in item.get("招牌菜", []) or [])
-        # 子串双向匹配：用户说「日料」能命中菜系里的「日本料理」，
-        # 说「日本料理」也能命中标签里的「日料」。只认单向会漏掉大量同义表达。
-        q = query.lower()
-        if q not in haystack.lower() and haystack.lower() not in q:
+        # 按同义组匹配：标准词「日本料理」要能命中知识库里的「日料」/「寿司」
+        terms_q = expand_query_terms(query)
+        hay_low = haystack.lower()
+        if not any(t in hay_low for t in terms_q) and hay_low not in query.lower():
             return False
 
     if taste_terms:

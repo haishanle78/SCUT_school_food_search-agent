@@ -315,6 +315,62 @@ def test_no_walk_zero_for_delivery() -> None:
     check("外卖结果不带步行字段", all(v is None for v in walk_values), str(walk_values))
 
 
+# ---------------- 10. 坏 Key 不能拖垮整个池 ----------------
+
+def test_bad_key_failover() -> None:
+    print("[10] 池里有一把失效 Key：必须自动换下一把，而不是整轮降级离线")
+    import llm.client as lc
+
+    saved = (config.LLM_PROVIDER, config.LLM_MODEL, config.LLM_BASE_URL, config.LLM_KEYS, config.LLM_ENABLED)
+    config.LLM_PROVIDER = "openai"
+    config.LLM_MODEL = "glm-4-flash"
+    config.LLM_BASE_URL = "https://example.invalid/v1"
+    # 第一把是失效 Key（401），第二把可用
+    config.LLM_KEYS = ["bad" * 11, "good" * 11]
+    config.LLM_ENABLED = True
+    try:
+        client = lc.LLMClient()
+        tried: list[str] = []
+
+        def fake_do_chat(body, key):
+            tried.append(key[:4])
+            if key.startswith("bad"):
+                raise RuntimeError(
+                    'LLM 调用失败: HTTP 401 {"error":{"code":"401","message":"令牌已过期或验证不正确"}}'
+                )
+            return {"choices": [{"message": {"role": "assistant", "content": "好"}, "finish_reason": "stop"}]}
+
+        client._do_chat = fake_do_chat
+        msg = client.chat([{"role": "user", "content": "hi"}])
+        check("坏 Key 未导致整轮失败", (msg.content or "") == "好", str(msg.content))
+        check("确实先撞了坏 Key 再换好的", tried[:1] != ["good"] and "good" in tried, str(tried))
+
+        # 坏 Key 已被熔断，后续请求不该再撞它
+        tried.clear()
+        client.chat([{"role": "user", "content": "hi"}])
+        check("坏 Key 被熔断后不再复用", tried == ["good"], str(tried))
+    finally:
+        (config.LLM_PROVIDER, config.LLM_MODEL, config.LLM_BASE_URL, config.LLM_KEYS, config.LLM_ENABLED) = saved
+
+
+# ---------------- 11. 离线兜底必须认菜系 ----------------
+
+def test_offline_fallback_respects_cuisine() -> None:
+    print("[11] 离线兜底：问日料不能推酸菜鱼（菜系条件不能被丢掉）")
+    agent = make_agent(mode="delivery")
+    reply = agent._offline_fallback("有日料的外卖推荐吗")
+    check("有内容返回", bool(reply and reply.strip()), repr(reply))
+    # 关键：不能出现完全无关的品类
+    check("没有推酸菜鱼", "酸菜鱼" not in reply, reply[:160])
+    check("没有推面馆/牛肉面这类无关项", ("面馆" not in reply), reply[:160])
+    # 认出日料后，结果里应出现日料相关词
+    check(
+        "结果与日料相关",
+        any(k in reply for k in ("寿司", "日料", "天妇罗", "刺身", "日本料理")) or "没有" in reply,
+        reply[:200],
+    )
+
+
 if __name__ == "__main__":
     test_japanese_delivery_cards()
     test_burger_delivery_params()
@@ -325,5 +381,7 @@ if __name__ == "__main__":
     test_request_dedupe()
     test_profile_isolation()
     test_no_walk_zero_for_delivery()
+    test_bad_key_failover()
+    test_offline_fallback_respects_cuisine()
     print(f"\n通过 {PASSED} 项" + ("" if not FAILED else f"，失败 {len(FAILED)} 项：{FAILED}"))
     raise SystemExit(0 if not FAILED else 1)
