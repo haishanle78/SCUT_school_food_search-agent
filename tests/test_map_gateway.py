@@ -242,6 +242,9 @@ def test_card_validation():
         "noroute": {"uid": "noroute", "名称": "未核实路线店", "地址": "番禺", "行政区": "番禺区", "坐标": "23.018,113.412",
                     "直线距离_米": 700, "是餐饮": True, "在范围内": True},
     })
+    # 关掉自动补查，明确模拟「有坐标但路线接口也拿不到」的情况（不发真实请求）
+    agent._auto_verify_route = lambda uid, modes: {}
+
     cards = agent._inject_card_facts([
         {"uid": "ok1", "cuisine": "粥", "reason": "近"},
         {"uid": "far1", "cuisine": "粤菜", "reason": "跨区"},
@@ -249,10 +252,17 @@ def test_card_validation():
         {"uid": "noroute", "cuisine": "粥", "reason": "没路线"},
         {"uid": "ghost", "cuisine": "粥", "reason": "编造"},
     ])
-    assert [c["uid"] for c in cards] == ["ok1"], f"只有合规卡片能通过: {[c['uid'] for c in cards]}"
+    # 硬校验（身份/餐饮/范围）仍然拦截；路线缺失改为「保留 + 标待核实」，
+    # 因为路线是增强信息不是推荐资格——否则模型漏调 verify_route 时整批卡片会消失。
+    assert [c["uid"] for c in cards] == ["ok1", "noroute"], f"卡片集合不对: {[c['uid'] for c in cards]}"
     reasons = " ".join(d["原因"] for d in agent.last_dropped)
-    assert "超出" in reasons and "附属设施" in reasons and "路线未核实" in reasons and "未核实" in reasons
-    ok("验收7 超范围/附属设施/路线未核实/uid 编造：全部被后端拦截")
+    assert "超出" in reasons and "附属设施" in reasons and "未核实" in reasons
+    ok("验收7 超范围/附属设施/uid 编造：硬性拦截")
+
+    pending = [c for c in cards if c["uid"] == "noroute"][0]
+    assert pending["route_pending"] is True and pending["route_verified"] is False, str(pending)
+    assert pending["transport"].get("路线状态", "").startswith("待核实"), str(pending["transport"])
+    ok("验收7a 路线查不到：卡片保留但标『路线待核实』，不冒充已核实")
 
     card = cards[0]
     assert card["identity_verified"] and card["route_verified"]

@@ -599,6 +599,8 @@ function renderCards(cards, summary) {
     if (c.price_per_person != null) tags += '<span class="tag money">人均 ¥' + esc(String(c.price_per_person)) + (c.price_source === "模型预估" ? "（预估）" : "") + "</span>";
     else tags += '<span class="tag">人均待确认</span>';
     if (c.route_verified) tags += '<span class="tag good">路线已核实</span>';
+    // 路线没查到不等于这家店不能推荐：如实标待核实，让用户自己决定去不去
+    if (c.route_pending) tags += '<span class="tag bad">路线待核实</span>';
     // 配送时长来自后端按直线距离估算，必须显式标「预估」，不能冒充商家承诺
     if (t.delivery_min != null) tags += '<span class="tag">🛵 配送约 ' + esc(String(t.delivery_min)) + " 分钟" + (t.delivery_eta_source ? "（预估）" : "") + "</span>";
     if (c.delivery_only && !c.route_verified) tags += '<span class="tag">外卖配送·无需步行</span>';

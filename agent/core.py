@@ -118,6 +118,79 @@ def _as_price(value: Any) -> float | None:
     return num if num > 0 else None
 
 
+# 工具参数的典型字段：出现这些的 JSON 块一定是模型把调用参数当正文输出了
+_ECHO_FIELDS = ('"uid"', '"cuisine"', '"recommendations"', '"reason"', '"price_per_person"')
+
+
+def _strip_tool_echo(text: str) -> str:
+    """清掉模型误写进正文的工具参数与内部日志。
+
+    实测线上出现过：回答里整段重复
+        {"uid": "b0c56ab7...", "cuisine": "肠粉", "reason": "..."}
+    后面还跟着「剔除未通过校验的推荐：石磨肠粉（路线未核实…）」——
+    这是模型的工具调用参数 + 后端内部日志，用户完全不该看到。
+
+    做法：按括号配平扫描，只删除「含工具字段特征」的 {…} / […] 块，
+    正常的中文括注、百分比、普通方括号不受影响。
+    """
+    raw = str(text or "")
+    if not raw:
+        return raw
+
+    # 1) 先去掉 ```json ... ``` 代码块
+    raw = re.sub(r"```(?:json)?\s*[\s\S]*?```", "", raw)
+
+    # 2) 括号配平扫描，删除含工具字段的 JSON 块
+    out: List[str] = []
+    i, n = 0, len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch not in "{[":
+            out.append(ch)
+            i += 1
+            continue
+        depth, j, in_str, esc = 0, i, False, False
+        while j < n:
+            c = raw[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c in "{[":
+                    depth += 1
+                elif c in "}]":
+                    depth -= 1
+                    if depth == 0:
+                        j += 1
+                        break
+            j += 1
+        block = raw[i:j]
+        if len(block) > 16 and any(k in block for k in _ECHO_FIELDS):
+            i = j  # 整块丢弃
+            continue
+        out.append(block)
+        i = j
+
+    cleaned = "".join(out)
+
+    # 3) 去掉后端内部日志（剔除原因不该给用户看）
+    cleaned = re.sub(r"剔除未通过校验的推荐[:：][\s\S]*$", "", cleaned)
+    # 4) 收拾多余空行与残留在行首的逗号
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"^[\s,，;；]*", "", cleaned)
+    cleaned = cleaned.strip()
+
+    # 清理过头（整段都是 JSON）就返回空，交给 _ensure_reply 兜底重写一句
+    return cleaned
+
+
 class FoodAdvisorAgent:
     def __init__(
         self,
@@ -192,6 +265,9 @@ class FoodAdvisorAgent:
         if self.llm.enabled:
             try:
                 reply = self._react_loop(user_input)
+                # 先清掉模型误吐的工具参数/内部日志，再进兜底：
+                # 清理后成空也能被 _ensure_reply 救回来
+                reply = _strip_tool_echo(reply)
                 reply = self._ensure_reply(reply, user_input)
                 reply = self._filter_cards_by_walk_limit(reply, user_input)
                 reply = self._guard_text_walk_limit(reply, user_input)
@@ -310,15 +386,40 @@ class FoodAdvisorAgent:
             "可以换个说法再问一次，比如直接说想吃什么品类、预算或能接受的步行时间。"
         )
 
+    def _auto_verify_route(self, uid: str, modes: List[str]) -> Dict[str, Any]:
+        """卡片校验阶段自动补查路线（模型漏调 verify_route 时兜住）。
+
+        只对调用方给的 uid 查，次数由 auto_route_budget 控制。
+        任何异常都吞掉并返回空路线——补查失败不能反过来把卡片也搞没。
+        """
+        from tools.route_planner import verify_route
+
+        for mode in modes or ["walking"]:
+            try:
+                verify_route(uid, poi_store=self.poi_store, mode=mode)
+            except Exception as exc:  # noqa: BLE001 —— 补查是增强，失败就降级标注
+                self._trace_fn(f"自动补查路线异常（{mode}）: {exc}")
+                break
+        poi = self.poi_store.get(uid) or {}
+        route = dict(poi.get("路线") or {})
+        if route.get("起点") and route["起点"] != self.origin_key:
+            return {}  # 出发点变了，旧路线不作数
+        return route
+
     # ---------- 卡片事实注入 + 硬校验：模型只做选择和解释 ----------
     def _inject_card_facts(self, recs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """按 uid 从 poi_store 注入事实字段，并做发布前硬校验。
 
-        校验项（任一不通过则整条剔除，绕不过去）：
+        硬校验（不通过就整条剔除，这些是"能不能推荐"的底线）：
           1. 身份已核实：uid 必须来自本次 search_poi / find_restaurant / 详情接口；
           2. 是餐饮门店（停车场、车站等附属设施一律拒绝）；
-          3. 在推荐范围内（附近推荐必须 3 公里内）；
-          4. 用户需要的交通方式路线已核实成功（且起点与当前出发点一致）。
+          3. 在推荐范围内（附近推荐必须 3 公里内）。
+
+        软校验（不通过仍出卡片，但如实标注）：
+          4. 路线是否已核实 —— 后端会先自动补查；补查不到就标「路线待核实」。
+             路线属于「值不值得跑一趟」的增强信息，不是推荐资格。
+             早期把它当硬门槛，模型漏调 verify_route 时整批卡片消失，
+             用户只看到「搜到 8 家、一张卡都没有」。
 
         字段策略：名称/地址/行政区/坐标/耗时/距离/路线链接由后端注入；
         人均/评分/营业时间/外卖能力没有后端来源时一律置空（前端显示"待确认"），
@@ -326,11 +427,15 @@ class FoodAdvisorAgent:
         """
         cards: List[Dict[str, Any]] = []
         seen_uids: set[str] = set()
+        # 自动补查路线的预算：只给排在前面的候选查（卡片本来就只展示前几家），
+        # 避免一次检索把地图路线额度烧穿。
+        auto_route_budget = 3
         for rec in recs:
             uid = str(rec.get("uid") or "").strip()
             if uid and uid in seen_uids:
                 continue  # 同一家店被重复推荐（模型常见的复制粘贴），只保留第一次
             seen_uids.add(uid)
+            route_pending = False
             poi = self.poi_store.get(uid)
             if poi is None:
                 self.last_dropped.append({"uid": uid or "?", "原因": "uid 未核实（不在本次检索结果中）"})
@@ -368,12 +473,24 @@ class FoodAdvisorAgent:
                 needed = [m for m in self._needed_modes if m in ("walking", "riding", "driving")]
                 label = {"walking": "步行", "riding": "骑行", "driving": "打车"}
                 verified = all(route.get(label[m]) for m in needed) if needed else bool(route)
+                if not verified and auto_route_budget > 0 and str(poi.get("坐标") or "").strip():
+                    # 模型经常漏调 verify_route 就直接调 format_recommendation，
+                    # 以前这会让所有候选因「缺步行」被整批剔除——用户看到的是
+                    # 「搜到 8 家、一张卡都没有」。路线是增强信息，不该当准入条件。
+                    # 这里后端自己补查一次，只给排在前面的候选（省地图额度）。
+                    auto_route_budget -= 1
+                    route = self._auto_verify_route(uid, needed)
+                    verified = all(route.get(label[m]) for m in needed) if needed else bool(route)
+                    if verified:
+                        self._trace_fn(f"自动补查路线成功: {poi.get('名称')}")
                 if not verified:
+                    # 补查也没拿到（配额/限流/接口异常/无路线）→ 不再剔除，
+                    # 照常出卡片，但如实标「路线待核实」，让用户自己判断要不要去。
+                    route_pending = True
                     missing = "、".join(label[m] for m in needed if not route.get(label[m]))
-                    self.last_dropped.append(
-                        {"uid": uid, "名称": poi.get("名称"), "原因": f"路线未核实（缺 {missing or '所需方式'}）"}
+                    self._trace_fn(
+                        f"路线待核实（{missing or '所需方式'}）但仍出卡片: {poi.get('名称')}"
                     )
-                    continue
 
             transport: Dict[str, Any] = {}
             if is_delivery:
@@ -405,6 +522,9 @@ class FoodAdvisorAgent:
                 transport["查询时间"] = route.get("查询时间", "")
                 if route.get("步行"):
                     transport["步行距离_米"] = route["步行"].get("距离_米")
+                if route_pending:
+                    # 如实说明：不是「很近」也不是「很远」，是后端没拿到
+                    transport["路线状态"] = "待核实（接口未返回可用结果）"
 
             # 人均：知识库有数据才算事实，否则模型值只能标"预估"（非数字一律视为无来源）
             kb_price = _as_price(poi.get("人均"))
@@ -420,6 +540,7 @@ class FoodAdvisorAgent:
                 "uid": uid,
                 "identity_verified": True,          # 身份已核实
                 "route_verified": bool(verified) and not is_delivery,  # 外卖没有路线，不冒充已核实
+                "route_pending": bool(route_pending),  # 路线没拿到，但卡片照出，标待核实
                 "delivery_only": is_delivery,
                 # 本次用餐方式与门店类别分开暴露，前端据此决定显示「配送参考」还是「路线」
                 "dining_mode": "delivery" if is_delivery else "dine_in",
@@ -465,21 +586,35 @@ class FoodAdvisorAgent:
         return cards
 
     def _filter_cards_by_walk_limit(self, reply: str, user_input: str) -> str:
-        """步行上限过滤：超限卡片降级为「替代方案」，全部超限时如实报告无匹配。"""
+        """步行上限过滤：超限卡片降级为「替代方案」，全部超限时如实报告无匹配。
+
+        注意：路线拿不到的卡片既不算达标、也不算超限，是「无法判断」。
+        早期把 walk_min 为 None 的当成超限，等于二次惩罚——
+        卡片刚因为路线缺失逃过一劫，又被这里标成「替代方案」。
+        """
         _q, _t, _b, minutes = self._parse_constraints(user_input)
         if not minutes or not self.last_cards:
             return reply
 
         within = [c for c in self.last_cards if self._walk_min(c) is not None and self._walk_min(c) <= minutes]
-        over = [c for c in self.last_cards if self._walk_min(c) is None or self._walk_min(c) > minutes]
+        over = [c for c in self.last_cards if self._walk_min(c) is not None and self._walk_min(c) > minutes]
+        unknown = [c for c in self.last_cards if self._walk_min(c) is None]
 
         if over:
             for c in over:
                 c["exceeds_walk_limit"] = True
 
+        unknown_note = ""
+        if unknown:
+            names = "、".join(str(c.get("name")) for c in unknown[:3])
+            unknown_note = (
+                f"\n\n另外 {names} 的步行时长暂时没查到（接口没返回），"
+                f"无法确认是否在 {minutes} 分钟内，去之前建议点卡片里的路线链接看一眼。"
+            )
+
         if not within and over:
             # 没有一家满足：如实说明，不强凑 Top3
-            self.last_cards = over  # 保留卡片作为"替代方案"展示
+            self.last_cards = over + unknown  # 保留卡片作为"替代方案"展示
             self.last_summary = f"没有步行 {minutes} 分钟内的完全匹配，以下为距离最近的替代（建议骑行/打车）"
             lines = [
                 f"实话实说：按你“步行不超过 {minutes} 分钟”的条件，{self.origin['name']} 附近没有完全匹配的店。",
@@ -497,12 +632,19 @@ class FoodAdvisorAgent:
                     f"{i}. {c.get('name')}｜{c.get('district', '')}｜{price_text}｜" + " / ".join(parts or ["路线待确认"])
                 )
             lines.append(f"如果坚持步行 {minutes} 分钟内，建议点外卖，或放宽到骑行时间，我再帮你筛。")
-            return "\n".join(lines)
+            return "\n".join(lines) + unknown_note
 
         if within and over:
             names = "、".join(str(c.get("name")) for c in over)
-            self.last_cards = within + over  # 达标的在前
-            return f"先说明：{names} 超过步行 {minutes} 分钟上限，放在后面作为替代；前面的店满足条件。\n\n{reply}"
+            self.last_cards = within + over + unknown  # 达标的在前
+            return (
+                f"先说明：{names} 超过步行 {minutes} 分钟上限，放在后面作为替代；前面的店满足条件。"
+                f"\n\n{reply}{unknown_note}"
+            )
+
+        if within and unknown:
+            self.last_cards = within + unknown
+            return f"{reply}{unknown_note}"
 
         return reply
 
@@ -1132,6 +1274,8 @@ class FoodAdvisorAgent:
             "不通过的会被剔除——没有合规的店就不要硬凑。\n"
             "**点外卖时（dining_mode=delivery）任何店都不需要 verify_route**："
             "外卖不是走过去的，卡片会显示配送参考与地图位置；到店吃（dine_in）才必须先 verify_route。\n"
+            "**回答正文里绝对不要出现 JSON、uid 字段名或工具参数**："
+            "那些是给程序看的，用户只看到一堆花括号会很困惑。要用平常话描述结果。\n"
             "**但「地图搜到这家店」不等于「确认它能送到校区」**：配送能力、配送费、配送时长"
             "没有依据时一律写「待确认」，配送时长只能说「预估 X 分钟」。\n"
             "**外卖店的正文、reason、warning 里只写口味、价格和配送，禁止写「步行几分钟/距离几公里」**——"

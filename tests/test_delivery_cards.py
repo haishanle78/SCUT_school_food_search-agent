@@ -112,21 +112,47 @@ def test_delivery_without_coord_kept_pending() -> None:
     )
 
 
-def test_dine_in_still_needs_route() -> None:
-    print("[3] 堂食店没有路线 → 照旧剔除（不能被外卖规则放过）")
+def test_dine_in_route_pending_not_dropped() -> None:
+    print("[3] 堂食店查不到路线 → 仍出卡片但标『路线待核实』（不再整条剔除）")
     agent = make_agent()
+    agent._auto_verify_route = lambda uid, modes: {}  # 模拟补查也失败，不发真实请求
     agent.poi_store["r1"] = {
         "uid": "r1", "名称": "潮埕", "坐标": "23.01,113.39", "是餐饮": True,
         "在范围内": True, "类别": "周边堂食", "路线": {},
     }
     cards = agent._inject_card_facts([{"uid": "r1", "reason": "潮汕牛肉"}])
-    check("堂食无路线被剔除", not cards)
-    check("剔除原因是路线未核实", any("路线" in d.get("原因", "") for d in agent.last_dropped), str(agent.last_dropped))
+    # 路线缺失曾导致整批卡片消失（用户看到「搜到 8 家、一张卡都没有」），
+    # 现在改为保留卡片 + 如实标注，身份/餐饮/范围三项硬校验不变。
+    check("无路线不再剔除", len(cards) == 1, str(agent.last_dropped))
+    card = cards[0] if cards else {}
+    check("标为路线待核实", card.get("route_pending") is True)
+    check("不冒充路线已核实", card.get("route_verified") is False)
+    check("交通字段注明待核实", str((card.get("transport") or {}).get("路线状态", "")).startswith("待核实"))
 
     agent.poi_store["r1"]["路线"] = {"起点": agent.origin_key, "步行": {"分钟": 18, "距离_米": 1400}, "来源": "百度地图 direction API"}
     cards2 = agent._inject_card_facts([{"uid": "r1", "reason": "潮汕牛肉"}])
-    check("补上路线后正常出卡片", len(cards2) == 1 and cards2[0]["route_verified"] is True)
+    check("补上路线后正常核实", len(cards2) == 1 and cards2[0]["route_verified"] is True)
     check("堂食链接是导航链接", "api.map.baidu.com/direction" in str(cards2[0]["route_link"]))
+
+
+def test_hard_checks_still_block() -> None:
+    print("[3b] 硬校验未被削弱：编造 uid / 非餐饮 / 超范围 仍然拦截")
+    agent = make_agent()
+    agent._auto_verify_route = lambda uid, modes: {}
+    agent.poi_store["park"] = {"uid": "park", "名称": "某店-门前停车场", "坐标": "23.01,113.39",
+                               "是餐饮": False, "在范围内": True, "类别": "联网检索"}
+    agent.poi_store["far"] = {"uid": "far", "名称": "跨区店", "坐标": "23.13,113.24",
+                              "是餐饮": True, "在范围内": False, "类别": "联网检索"}
+    cards = agent._inject_card_facts([
+        {"uid": "park", "reason": "x"},
+        {"uid": "far", "reason": "x"},
+        {"uid": "ghost", "reason": "x"},
+    ])
+    check("全部被拦截", not cards, str([c.get("name") for c in cards]))
+    reasons = " ".join(d.get("原因", "") for d in agent.last_dropped)
+    check("原因含附属设施", "附属设施" in reasons, reasons)
+    check("原因含超出范围", "超出" in reasons, reasons)
+    check("原因含 uid 未核实", "未核实" in reasons, reasons)
 
 
 def test_local_hit_registers_poi() -> None:
@@ -212,7 +238,8 @@ if __name__ == "__main__":
     config.KB_DEMO = False
     test_delivery_card_without_route()
     test_delivery_without_coord_kept_pending()
-    test_dine_in_still_needs_route()
+    test_dine_in_route_pending_not_dropped()
+    test_hard_checks_still_block()
     test_local_hit_registers_poi()
     test_far_branch_not_in_range()
     test_duplicate_uid_deduped()

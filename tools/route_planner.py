@@ -604,6 +604,18 @@ def find_restaurant(
 
     poi = best
     store.setdefault(poi["uid"], poi)
+    # 匹配度分级：0.75 这种「很像但字面不同」的情况很常见（达海煲仔饭 → 海览美食），
+    # 以前统一提示「已确认这家店的身份」，模型看到店名对不上就自己否定了，
+    # 用户听到的是「没找到」。所以按置信度给不同说法。
+    if best_score >= 0.9:
+        confidence, hint = "高", "已确认这家店的身份；需要路线请调用 verify_route(uid)。若超出校区范围要明确告知用户。"
+    else:
+        confidence, hint = (
+            "中",
+            f"名称高度相似（匹配度 {best_score:.2f}），很可能就是用户说的那家，"
+            f"但字面不完全一致。请以「疑似这家：{poi['名称']}，地址在{poi.get('地址') or '（暂无地址）'}，是你要找的吗」"
+            "的方式回答，并请用户确认；确认后即可正常描述这家店，不要直接说「没找到」。",
+        )
     return json.dumps(
         {
             "状态": "match",
@@ -611,6 +623,7 @@ def find_restaurant(
             "uid": poi["uid"],
             "名称": poi["名称"],
             "匹配度": best_score,
+            "置信度": confidence,
             "地址": poi["地址"],
             "行政区": poi["行政区"],
             "坐标": poi["坐标"],
@@ -618,7 +631,7 @@ def find_restaurant(
             "范围": poi["范围说明"],
             "检索范围": scope_text,
             "是餐饮": poi.get("是餐饮"),
-            "提示": "已确认这家店的身份；需要路线请调用 verify_route(uid)。若超出校区范围要明确告知用户。",
+            "提示": hint,
             "要求": "只描述这家店；不要替换成别的店，也不要顺手推荐其他店（除非用户明确要求替代方案）。",
         },
         ensure_ascii=False,

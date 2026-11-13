@@ -371,6 +371,119 @@ def test_offline_fallback_respects_cuisine() -> None:
     )
 
 
+# ---------------- 12. 路线缺失不能把整批卡片干掉 ----------------
+
+def test_route_missing_keeps_cards() -> None:
+    print("[12] 八家候选全都查不到路线：卡片必须还在（不能整批消失）")
+    agent = make_agent(mode="dine_in")
+    agent._auto_verify_route = lambda uid, modes: {}  # 模拟补查也失败
+    names = ["石磨肠粉", "大山坊石磨肠粉店", "云浮特色肠粉", "王记石磨肠粉", "初味肠粉"]
+    recs = []
+    for i, name in enumerate(names):
+        uid = "c%023d" % i
+        agent.poi_store[uid] = {
+            "uid": uid, "名称": name, "地址": "番禺区", "行政区": "番禺区",
+            "坐标": "23.01%d,113.41%d" % (i, i), "直线距离_米": 600 + i * 100,
+            "是餐饮": True, "在范围内": True, "类别": "联网检索", "路线": {},
+        }
+        recs.append({"uid": uid, "cuisine": "肠粉", "reason": "附近肠粉推荐"})
+    cards = agent._inject_card_facts(recs)
+    check("不是零卡片（原来会全被『缺步行』剔除）", len(cards) == 5, f"通过 {len(cards)}，剔除 {len(agent.last_dropped)}")
+    check("没有因路线原因剔除任何一条", not any("路线未核实" in d.get("原因", "") for d in agent.last_dropped), str(agent.last_dropped))
+    check("全部标为路线待核实", all(c.get("route_pending") for c in cards))
+    check("没有冒充已核实", all(c.get("route_verified") is False for c in cards))
+
+
+def test_auto_verify_route_fills_gap() -> None:
+    print("[13] 模型漏调 verify_route：后端应自动补查，补到就正常核实")
+    agent = make_agent(mode="dine_in")
+    uid = "a" * 24
+    agent.poi_store[uid] = {
+        "uid": uid, "名称": "自动补查肠粉店", "地址": "番禺区", "坐标": "23.018,113.412",
+        "直线距离_米": 800, "是餐饮": True, "在范围内": True, "类别": "联网检索", "路线": {},
+    }
+    called = {"n": 0}
+
+    def fake_auto(uid_arg, modes):
+        called["n"] += 1
+        return {"步行": {"分钟": 11, "距离_米": 800}, "来源": "测试补查", "起点": agent.origin_key}
+
+    agent._auto_verify_route = fake_auto
+    cards = agent._inject_card_facts([{"uid": uid, "cuisine": "肠粉", "reason": "近"}])
+    check("触发了自动补查", called["n"] == 1, str(called))
+    check("补到路线后正常出卡片", len(cards) == 1 and cards[0]["route_verified"] is True, str(agent.last_dropped))
+    check("交通里带步行分钟", (cards[0].get("transport") or {}).get("walk_min") == 11, str(cards[0].get("transport")))
+
+    # 补查预算有限：一次最多补 3 家，避免烧穿路线额度
+    agent2 = make_agent(mode="dine_in")
+    budget_calls = {"n": 0}
+
+    def counting_auto(uid_arg, modes):
+        budget_calls["n"] += 1
+        return {}
+
+    agent2._auto_verify_route = counting_auto
+    recs = []
+    for i in range(8):
+        u = "b%023d" % i
+        agent2.poi_store[u] = {
+            "uid": u, "名称": "店%d" % i, "坐标": "23.01,113.41", "是餐饮": True,
+            "在范围内": True, "类别": "联网检索", "路线": {},
+        }
+        recs.append({"uid": u, "reason": "x"})
+    agent2._inject_card_facts(recs)
+    check("补查次数受预算限制（≤3）", budget_calls["n"] <= 3, str(budget_calls))
+
+
+# ---------------- 14. 正文不能出现工具参数 JSON ----------------
+
+def test_strip_tool_echo() -> None:
+    print("[14] 模型把工具参数吐进正文：必须清掉，用户不该看到花括号")
+    from agent.core import _strip_tool_echo
+
+    bad = (
+        '{"uid": "b0c56ab77ef2067f750269ad", "cuisine": "肠粉", "reason": "以上是附近肠粉店推荐"}, '
+        '{"uid": "10a14c95bd0d688cd7851f46", "cuisine": "肠粉", "reason": "以上是推荐"}\n'
+        "剔除未通过校验的推荐：石磨肠粉（路线未核实（缺 步行））；大山坊（路线未核实（缺 步行））"
+    )
+    cleaned = _strip_tool_echo(bad)
+    check("JSON 块被清除", '"uid"' not in cleaned and "cuisine" not in cleaned, cleaned[:80])
+    check("内部剔除日志被清除", "剔除未通过校验" not in cleaned, cleaned[:80])
+    check("清理后为空（交给兜底重写）", cleaned == "", repr(cleaned))
+
+    normal = "附近肠粉店有几家不错，石磨肠粉走路十来分钟，人均 15 元左右。"
+    check("正常中文不受影响", _strip_tool_echo(normal) == normal, _strip_tool_echo(normal))
+    bracketed = "推荐 A 店（人均 20 元【便宜】）"
+    check("中文方括号不误删", _strip_tool_echo(bracketed) == bracketed, _strip_tool_echo(bracketed))
+
+
+# ---------------- 15. 店名匹配的置信度分级 ----------------
+
+def test_find_restaurant_confidence() -> None:
+    print("[15] 店名『很像但字面不同』：应提示疑似+请确认，而不是让模型说没找到")
+    import tools.route_planner as rp
+
+    original = rp.gw._do_http
+
+    def fake_http(path, params, ak=None):
+        return rp.gw.MapResult(rp.gw.OK, payload={"status": 0, "results": [{
+            "uid": "u_bm_1", "name": "海览美食", "address": "傍江东村公交站38号",
+            "location": {"lat": 23.018, "lng": 113.412},
+            "detail_info": {"type": "cater", "tag": "美食;中餐厅"},
+        }]})
+
+    rp.gw._do_http = fake_http
+    try:
+        data = json.loads(rp.find_restaurant("达海美食", poi_store={}))
+        check("状态为 match", data.get("状态") == "match", str(data.get("状态")))
+        check("带置信度字段", data.get("置信度") in ("高", "中"), str(data.get("置信度")))
+        hint = str(data.get("提示") or "")
+        check("提示要求以疑似方式确认", "疑似" in hint or "确认" in hint, hint[:100])
+        check("不再暗示『已确认身份』", "已确认这家店的身份" not in hint, hint[:100])
+    finally:
+        rp.gw._do_http = original
+
+
 if __name__ == "__main__":
     test_japanese_delivery_cards()
     test_burger_delivery_params()
@@ -383,5 +496,9 @@ if __name__ == "__main__":
     test_no_walk_zero_for_delivery()
     test_bad_key_failover()
     test_offline_fallback_respects_cuisine()
+    test_route_missing_keeps_cards()
+    test_auto_verify_route_fills_gap()
+    test_strip_tool_echo()
+    test_find_restaurant_confidence()
     print(f"\n通过 {PASSED} 项" + ("" if not FAILED else f"，失败 {len(FAILED)} 项：{FAILED}"))
     raise SystemExit(0 if not FAILED else 1)
