@@ -114,10 +114,45 @@ def test_multi_value_split():
         importlib.reload(config)
 
 
+def test_single_source_no_runtime_env():
+    """回归：runtime.env 已删除，配置只能来自 .env，且不再存在会失效的开关。
+
+    历史 bug：runtime.env 用 override=True 二次加载，把 .env 的值顶掉；
+    而"关闭开关"写的是 `not in {"1","true",...}`，填 0 也会被当成关闭、
+    填 1 才生效——语义反直觉，导致改了 .env 却不生效。
+    """
+    assert not (BASE / "runtime.env").exists(), "runtime.env 应已删除，配置只留 .env 一份"
+    src = (BASE / "config.py").read_text(encoding="utf-8")
+    assert "runtime.env" not in src, "config.py 不应再引用 runtime.env"
+    assert "USE_PLATFORM_ENV" not in src, "开关已移除，不应再出现在 config.py"
+    assert config.CONFIG_SOURCE in {"env-file", "process-env"}, config.CONFIG_SOURCE
+    ok("单一配置源：无 runtime.env、无失效开关")
+
+
+def test_both_pools_declared_same_file():
+    """.env 里 Key 池与 AK 池必须写在同一个文件，且数量一致（防只更新一处）。"""
+    env_path = BASE / ".env"
+    if not env_path.exists():
+        print("[跳过] 无本地 .env（如 CI），不做实际值校验")
+        return
+    llm = config.LLM_KEYS
+    aks = config.BAIDU_MAP_AKS
+    assert llm, ".env 未解析出任何 LLM Key"
+    assert aks, ".env 未解析出任何地图 AK"
+    # 每把 Key/AK 都必须是完整长度，避免粘贴被截断（智谱 Key 49 字符、百度 AK 32 字符）
+    for k in llm:
+        assert len(k) >= 30, f"LLM Key 长度异常（{len(k)}），可能粘贴不全"
+    for a in aks:
+        assert len(a) >= 24, f"地图 AK 长度异常（{len(a)}），可能粘贴不全"
+    ok(f"凭据池已装配：LLM Key {len(llm)} 把 / 地图 AK {len(aks)} 把")
+
+
 if __name__ == "__main__":
     test_inline_comment()
     test_quoted_hash_kept()
     test_empty_and_plain()
     test_template_parses_cleanly()
     test_multi_value_split()
+    test_single_source_no_runtime_env()
+    test_both_pools_declared_same_file()
     print(f"=== 全部 {PASS} 项配置解析测试通过 ===")

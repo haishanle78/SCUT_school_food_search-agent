@@ -36,15 +36,14 @@ def load_dotenv(path: str, override: bool = False) -> None:
                 os.environ[key] = value
 
 
+# .env 是唯一配置源：本地与云端都只读这一个文件，不再有第二层覆盖。
+# 这样「改了 .env 却不生效」这类问题从根上消失——不需要记任何开关。
+# 优先级：进程环境变量（平台注入/命令行） > .env 文件 > 代码默认值。
+# 云端没有 .env 时，只要平台环境变量按 .env 里的同名键填好，照样能跑。
 load_dotenv(os.path.join(BASE_DIR, ".env"))
-# 云端可能保留上一次部署的环境变量，且 .env 不一定随源码上传。
-# runtime.env 是随项目发布的服务端专用配置，覆盖旧值，保证线上模型/坐标一致。
-# 但平台侧若改用「环境变量/密钥管理」注入新凭据，设置 USE_PLATFORM_ENV=1 即可让
-# 平台注入值优先，避免打包配置把云端新密钥覆盖回旧值。
-CONFIG_SOURCE = "platform-env"
-if os.getenv("USE_PLATFORM_ENV", "").strip().lower() not in {"1", "true", "yes", "on"}:
-    load_dotenv(os.path.join(BASE_DIR, "runtime.env"), override=True)
-    CONFIG_SOURCE = "runtime.env"
+CONFIG_SOURCE = "env-file"
+if not os.path.exists(os.path.join(BASE_DIR, ".env")):
+    CONFIG_SOURCE = "process-env"
 
 
 # ---------- LLM ----------

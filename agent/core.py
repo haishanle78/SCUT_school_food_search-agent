@@ -191,9 +191,9 @@ class FoodAdvisorAgent:
                 wait = getattr(busy, "retry_after", 10) or 10
                 self._trace_fn(f"模型通道排队超时（建议 {wait} 秒后重试），返回稍后再试提示")
                 if wait >= 60:
-                    text = f"模型通道刚被限流，正在冷却，约 {max(1, round(wait / 60))} 分钟后自动恢复，不用重开页面。"
+                    text = f"模型接口刚被上游限流，正在冷却，约 {max(1, round(wait / 60))} 分钟后自动恢复，不用重开页面。"
                 else:
-                    text = f"现在模型通道有点挤，请等 {wait} 秒左右再发一次，你的问题我还记着呢。"
+                    text = f"这一步模型响应慢了一点，通道正忙，请等 {wait} 秒左右再发一次，你的问题我还记着呢。"
                 return text + "（这不是你的操作问题，也不是服务挂了。）"
             except RuntimeError as exc:
                 self._trace_fn(f"LLM 异常，切换离线模式: {exc}")

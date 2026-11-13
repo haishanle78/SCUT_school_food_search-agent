@@ -13,7 +13,7 @@
 ```
 SDK/
 ├── main.py                  # CLI 入口：交互对话 / --demo 演示
-├── config.py                # 配置：.env → runtime.env（可关）→ 环境变量
+├── config.py                # 配置：环境变量 → .env → 代码默认值（单一配置源）
 ├── verify_deploy.py         # 核对线上代码与本地源码是否一致（build 指纹）
 ├── .env.example             # 配置模板（复制为 .env 后填 Key）
 ├── agent/
@@ -119,8 +119,7 @@ CHAT_RATE_PER_MIN=8             # 每会话每分钟提问上限
 CHAT_GLOBAL_DAILY=300           # 全站每日提问上限
 MAX_TOOL_CALLS_PER_TURN=10      # 单轮工具调用预算
 
-# 云端用平台环境变量注入密钥时，设为 1 让平台值优先（否则 runtime.env 会覆盖）
-# USE_PLATFORM_ENV=1
+# 只读 .env，没有第二层覆盖文件；云端无 .env 时把同名键填进平台环境变量即可
 ```
 
 **怎么填（照做即可）**
@@ -138,9 +137,9 @@ MAX_TOOL_CALLS_PER_TURN=10      # 单轮工具调用预算
 
 **安全纪律**
 
-- `.env` / `runtime.env` 只放服务端，永不进前端、日志、分享包、截图、PPT。
+- `.env` 只放服务端，永不进前端、日志、分享包、截图、PPT。
 - 不要 `git add -f .env`（`.gitignore` 已拦截，强制添加会泄露）。
-- 云端部署的密钥走 `runtime.env`（随部署包上传）或平台环境变量注入（开 `USE_PLATFORM_ENV=1`），**不是**本地这份 `.env`。
+- 云端部署：把 `.env` 里的同名键填进平台「环境变量/密钥管理」，或把 `.env` 一并上传；两者都没有时才走代码默认值（无 Key = 离线模式，无 AK = 不查地图）。
 
 **排错**
 
@@ -300,7 +299,7 @@ python tests/test_weather_gateway.py  # 12 项：雨/高温决策翻译、全站
 
 ## 9. 团队协作
 
-- `.env` / `runtime.env` / `data/sessions/` / `data/map_usage.json` / `__pycache__` 永不入库（见 `.gitignore`）；
+- `.env` / `data/sessions/` / `data/map_usage.json` / `__pycache__` 永不入库（见 `.gitignore`）；
 - 私有仓库 + 分支：`main` 可发布；
 - 发布权只在 owner（绑账号）：队友改 → 推送 → owner 拉取自测 → 发布 → `verify_deploy.py` 复核；
 - **匿名要求**：参赛网页、截图、录屏、PPT 一律不出现姓名/学号/指导教师；Git 提交历史不必为匿名改写。

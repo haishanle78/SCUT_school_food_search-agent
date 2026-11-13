@@ -98,9 +98,14 @@ class KeyPool:
                     lefts = [s.breaker_until - now_wall for s in self._slots]
                 cooling = [x for x in lefts if x > 0]
                 # 全部 Key 都在冷却 → 告诉用户真实等待时长；否则只是排队没抢到名额
-                retry_after = int(min(cooling)) + 1 if cooling and len(cooling) == len(self._slots) else 10
+                all_cooling = bool(cooling) and len(cooling) == len(self._slots)
+                retry_after = int(min(cooling)) + 1 if all_cooling else 10
+                if all_cooling:
+                    reason = "所有模型通道都在冷却（刚被上游限流）"
+                else:
+                    reason = "模型通道正被其他请求占用"
                 raise LLMBusy(
-                    f"所有模型通道都在忙，排队 {self._queue_wait:.0f} 秒未排到",
+                    f"{reason}，排队 {self._queue_wait:.0f} 秒仍未排到",
                     retry_after=retry_after,
                 )
             time.sleep(0.05)
