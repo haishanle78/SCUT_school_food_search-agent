@@ -112,6 +112,17 @@ def part2_full_loop():
     print(f"Part 2 完整ReAct循环压力测试（30轮，假LLM共响应{agent.llm.seen}次）: 通过")
 
 
+def part4_protocol_leak():
+    """Part 4：模型把流式协议片段当正文吐出来时，必须截断（用户不能看到原始 JSON）。"""
+    from llm.client import LLMClient
+
+    leak = '寿司郎在番禺天河城B2层。{"index":0,"finish_reason":"tool_calls","delta":{"role":"assistant"}}'
+    cleaned = LLMClient._strip_protocol_leak(leak)
+    assert cleaned == "寿司郎在番禺天河城B2层。", repr(cleaned)
+    assert LLMClient._strip_protocol_leak("正常回答") == "正常回答"
+    print("Part 4 协议残留清洗: 通过")
+
+
 def part3_max_steps_poison():
     """Part 3：MAX_STEPS 用尽（循环不带最终回答就退出）后继续对话——
     这是历史上最容易产生悬空消息的场景。"""
@@ -131,4 +142,5 @@ if __name__ == "__main__":
     part1_memory_stress()
     part2_full_loop()
     part3_max_steps_poison()
+    part4_protocol_leak()
     print("=== 全部压力测试通过：发给 LLM 的消息序列永远合法 ===")
