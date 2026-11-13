@@ -7,11 +7,19 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+import re
 from typing import Any, Dict, List
 
 import config
+
+
+def _split_terms(text: str) -> List[str]:
+    """把「不吃香菜、不要葱」这类口语串拆成独立条目，便于逐条去重累积。"""
+    parts = re.split(r"[、,，;；/\s]+", (text or "").strip())
+    return [p.strip() for p in parts if p.strip()]
 
 
 class ConversationMemory:
@@ -148,7 +156,11 @@ class UserProfile:
 
     def __init__(self, path: str = config.PROFILE_PATH) -> None:
         self.path = path
-        self.data: Dict[str, Any] = dict(self.DEFAULTS)
+        # 必须深拷贝：DEFAULTS 是类属性，dict() 只是浅拷贝，
+        # 所有实例会共享同一批 list。A 用户记了「不吃香菜」，
+        # 这个值就写进了类的默认列表，之后新建的每个用户都会莫名其妙带着它——
+        # 也就是「不同用户画像串数据」。
+        self.data: Dict[str, Any] = copy.deepcopy(self.DEFAULTS)
         self._load()
 
     def _load(self) -> None:
@@ -167,12 +179,33 @@ class UserProfile:
             json.dump(self.data, handle, ensure_ascii=False, indent=2)
 
     def update(self, key: str, value: Any) -> None:
+        """写入画像。列表型字段只追加、不覆盖，字符串型字段才整体替换。
+
+        历史 bug：模型有时把忌口当成一句话传（value="不吃香菜、不要葱"），
+        有时传列表。旧逻辑遇到 list 会「整体替换」——后一次记的忌口把前一次冲掉，
+        用户会发现自己说过三次忌口，系统只记得最后一次。
+        """
         if key not in self.data:
             self.data[key] = []
-        if isinstance(self.data[key], list) and value not in self.data[key]:
-            self.data[key].append(value)
+
+        # 统一把传入值拍平成字符串列表（兼容 "a、b" / "a,b" / ["a","b"]）
+        incoming: List[str] = []
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                incoming.extend(_split_terms(str(item)))
         else:
-            self.data[key] = value
+            incoming.extend(_split_terms(str(value)))
+        incoming = [t for t in incoming if t]
+        if not incoming:
+            return
+
+        if isinstance(self.data[key], list):
+            for term in incoming:
+                if term not in self.data[key]:
+                    self.data[key].append(term)
+        else:
+            # 预算是单值语义，后一次覆盖前一次是合理的
+            self.data[key] = incoming[0] if len(incoming) == 1 else "、".join(incoming)
         self.save()
 
     def as_prompt_text(self) -> str:

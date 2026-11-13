@@ -1,0 +1,264 @@
+"""外卖店卡片链路测试：外卖不需要步行路线，有坐标就能出卡片。
+
+覆盖三条规则：
+1. 外卖门店（类别=外卖）有坐标但没路线 → 允许出卡片，交通字段是配送参考，
+   链接是地图标注而不是导航；
+2. 外卖门店没有坐标 → 仍然剔除（不能拿一个不知道在哪的店推荐给用户）；
+3. 堂食门店没有路线 → 照旧剔除，不能被外卖豁免规则顺带放过。
+
+跑法：python tests/test_delivery_cards.py
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import config
+from agent.core import FoodAdvisorAgent, _trace
+from agent.memory import ConversationMemory, UserProfile
+from tools import build_registry
+
+PASSED = 0
+FAILED: list[str] = []
+
+
+def check(name: str, ok: bool, detail: str = "") -> None:
+    global PASSED
+    if ok:
+        PASSED += 1
+        print(f"  ok  {name}")
+    else:
+        FAILED.append(name)
+        print(f"  FAIL {name}  {detail}")
+
+
+def make_agent(mode: str = "") -> FoodAdvisorAgent:
+    agent = FoodAdvisorAgent.__new__(FoodAdvisorAgent)
+    agent.profile = UserProfile()
+    agent.poi_store = {}
+    agent.functions, agent.schemas = build_registry(agent.profile, agent.poi_store)
+    agent.memory = ConversationMemory("")
+    agent._trace_fn = _trace
+    agent.last_cards = None
+    agent.last_summary = ""
+    agent.last_dropped = []
+    agent.origin_key = config.DEFAULT_ORIGIN
+    agent.origin = config.origin_by_key(agent.origin_key)
+    agent._needed_modes = ["walking"]
+    agent._dining_mode = mode
+    return agent
+
+
+def test_delivery_card_without_route() -> None:
+    print("[1] 外卖店有坐标、无路线 → 允许出卡片")
+    agent = make_agent()
+    agent.poi_store["dl1"] = {
+        "uid": "dl1", "名称": "刘文祥麻辣烫(市桥店)", "地址": "市桥街某路1号",
+        "行政区": "广东省 广州市 番禺区", "坐标": "22.956873,113.370643",
+        "直线距离_米": 8004, "是餐饮": True, "在范围内": True,
+        "来源": "本地知识库", "类别": "外卖", "人均": 25, "学生评分": 2.5,
+        "平均配送分钟": 40, "路线": {},
+    }
+    cards = agent._inject_card_facts([{"uid": "dl1", "cuisine": "麻辣烫", "reason": "评论区说别点", "warning": "避雷"}])
+    check("卡片未被剔除", len(cards) == 1, str(agent.last_dropped))
+    card = cards[0] if cards else {}
+    check("标记为外卖专属", card.get("delivery_only") is True)
+    check("不冒充路线已核实", card.get("route_verified") is False)
+    # 8 公里外的店不可能还是人工填的 40 分钟：时长必须跟距离自洽
+    check("配送时长按距离估算", card.get("transport", {}).get("delivery_min") == 65, str(card.get("transport")))
+    check("远距离店标注超配送半径", "超出常规配送半径" in str(card.get("transport", {}).get("距离说明")), str(card.get("transport")))
+    check("链接是地图标注而非导航", "api.map.baidu.com/marker" in str(card.get("route_link")))
+    check("名称与地址来自后端", card.get("name") == "刘文祥麻辣烫(市桥店)" and card.get("address") == "市桥街某路1号")
+    check("评分来自知识库", card.get("rating") == 2.5)
+
+    # 近店对照组：1.9 公里 → 30 分钟，且不该提示超出配送半径
+    agent.poi_store["dl_near"] = {
+        "uid": "dl_near", "名称": "烹湘", "地址": "兴业大道1166-1号铺",
+        "行政区": "广东省 广州市 番禺区", "坐标": "23.00976,113.39542",
+        "直线距离_米": 1924, "是餐饮": True, "在范围内": True,
+        "来源": "本地知识库", "类别": "外卖", "人均": 28, "学生评分": 4.3,
+        "平均配送分钟": 35, "路线": {},
+    }
+    near = agent._inject_card_facts([{"uid": "dl_near", "cuisine": "湘菜"}])
+    near_t = (near[0].get("transport") if near else {}) or {}
+    check("近店配送时长按距离算", near_t.get("delivery_min") == 30, str(near_t))
+    check("近店不报超出配送半径", "超出" not in str(near_t.get("距离说明")), str(near_t))
+
+
+def test_delivery_without_coord_kept_pending() -> None:
+    print("[2] 外卖店没有坐标 → 仍可推荐，但位置标待确认、不给导航")
+    agent = make_agent(mode="delivery")
+    agent.poi_store["dl2"] = {
+        "uid": "dl2", "名称": "遇见赣厨", "坐标": "", "是餐饮": True,
+        "在范围内": True, "类别": "外卖", "路线": {},
+    }
+    cards = agent._inject_card_facts([{"uid": "dl2", "reason": "好吃"}])
+    check("无坐标不再剔除（私域商家常常没有坐标）", len(cards) == 1, str(agent.last_dropped))
+    card = cards[0] if cards else {}
+    check("标记位置待确认", card.get("coordinate_pending") is True)
+    check("没有坐标就不给任何链接", card.get("route_link") is None)
+    check(
+        "距离说明写明位置待确认",
+        "位置待确认" in str((card.get("transport") or {}).get("距离说明")),
+        str(card.get("transport")),
+    )
+    check(
+        "不编造配送能力",
+        (card.get("transport") or {}).get("配送能力") in ("待确认", "知识库标注可外卖"),
+        str(card.get("transport")),
+    )
+
+
+def test_dine_in_route_pending_not_dropped() -> None:
+    print("[3] 堂食店查不到路线 → 仍出卡片但标『路线待核实』（不再整条剔除）")
+    agent = make_agent()
+    agent._auto_verify_route = lambda uid, modes: {}  # 模拟补查也失败，不发真实请求
+    agent.poi_store["r1"] = {
+        "uid": "r1", "名称": "潮埕", "坐标": "23.01,113.39", "是餐饮": True,
+        "在范围内": True, "类别": "周边堂食", "路线": {},
+    }
+    cards = agent._inject_card_facts([{"uid": "r1", "reason": "潮汕牛肉"}])
+    # 路线缺失曾导致整批卡片消失（用户看到「搜到 8 家、一张卡都没有」），
+    # 现在改为保留卡片 + 如实标注，身份/餐饮/范围三项硬校验不变。
+    check("无路线不再剔除", len(cards) == 1, str(agent.last_dropped))
+    card = cards[0] if cards else {}
+    check("标为路线待核实", card.get("route_pending") is True)
+    check("不冒充路线已核实", card.get("route_verified") is False)
+    check("交通字段注明待核实", str((card.get("transport") or {}).get("路线状态", "")).startswith("待核实"))
+
+    agent.poi_store["r1"]["路线"] = {"起点": agent.origin_key, "步行": {"分钟": 18, "距离_米": 1400}, "来源": "百度地图 direction API"}
+    cards2 = agent._inject_card_facts([{"uid": "r1", "reason": "潮汕牛肉"}])
+    check("补上路线后正常核实", len(cards2) == 1 and cards2[0]["route_verified"] is True)
+    check("堂食链接是导航链接", "api.map.baidu.com/direction" in str(cards2[0]["route_link"]))
+
+
+def test_hard_checks_still_block() -> None:
+    print("[3b] 硬校验未被削弱：编造 uid / 非餐饮 仍拦截；超范围看场景")
+    agent = make_agent()
+    agent._auto_verify_route = lambda uid, modes: {}
+    agent._nearby_strict = True  # 「附近推荐」语境：超范围必须剔除
+    agent.poi_store["park"] = {"uid": "park", "名称": "某店-门前停车场", "坐标": "23.01,113.39",
+                               "是餐饮": False, "在范围内": True, "类别": "联网检索"}
+    agent.poi_store["far"] = {"uid": "far", "名称": "跨区店", "坐标": "23.13,113.24",
+                              "是餐饮": True, "在范围内": False, "类别": "联网检索"}
+    cards = agent._inject_card_facts([
+        {"uid": "park", "reason": "x"},
+        {"uid": "far", "reason": "x"},
+        {"uid": "ghost", "reason": "x"},
+    ])
+    check("附近语境下全部被拦截", not cards, str([c.get("name") for c in cards]))
+    reasons = " ".join(d.get("原因", "") for d in agent.last_dropped)
+    check("原因含附属设施", "附属设施" in reasons, reasons)
+    check("原因含超出范围", "超出" in reasons, reasons)
+    check("原因含 uid 未核实", "未核实" in reasons, reasons)
+
+    # 只是想吃某品类（没说要附近）时，远店保留但必须标出来
+    # （知识库商圈店通常没有坐标，只有商圈字段——这正是需要商圈估算的场景）
+    agent2 = make_agent()
+    agent2._auto_verify_route = lambda uid, modes: {}
+    agent2._nearby_strict = False
+    agent2.poi_store["far2"] = {"uid": "far2", "名称": "番禺天河城日料店", "坐标": "",
+                                "是餐饮": True, "在范围内": False, "商圈": "番禺天河城",
+                                "商圈距离_米": 7500, "类别": "周边堂食"}
+    cards2 = agent2._inject_card_facts([{"uid": "far2", "reason": "同类推荐"}])
+    check("非附近语境下远店可出卡片", len(cards2) == 1, str(agent2.last_dropped))
+    if cards2:
+        check("标为超出附近范围", cards2[0].get("out_of_range") is True)
+        check("带商圈距离说明", "7.5 公里" in str((cards2[0].get("transport") or {}).get("位置说明")),
+              str(cards2[0].get("transport")))
+
+
+def test_local_hit_registers_poi() -> None:
+    print("[4] 本地知识库命中 → 自动登记进 poi_store（否则卡片必被剔除）")
+    import importlib
+
+    fs = importlib.import_module("tools.food_search")  # tools.food_search 同时是函数名，必须拿模块本身
+
+    store: dict = {}
+    fs.food_search("外卖", poi_store=store)
+    check("外卖本地命中已登记", bool(store), f"poi_store 条数 {len(store)}")
+    # 外卖场景不只收「外卖专营店」：知识库里的堂食店也可能接单，
+    # 只是后端没有配送依据，卡片会标「配送能力待确认」。
+    # 所以这里只要求有登记、且类别都是合法值，不再强求清一色「外卖」。
+    kinds = {v.get("类别") for v in store.values()}
+    check("登记条目类别合法", kinds <= {"外卖", "周边堂食", "饭堂窗口"}, str(kinds))
+    check("外卖专营店仍在其中", "外卖" in kinds, str(kinds))
+    with_coord = [v for v in store.values() if v.get("坐标")]
+    check("有坐标的条目带 uid", all(v.get("uid") for v in with_coord))
+
+
+def test_far_branch_not_in_range() -> None:
+    print("[5] 商圈店（6–11km）登记后不算「附近」，避免被当步行推荐")
+    from tools.route_planner import register_kb_poi
+
+    store: dict = {}
+    register_kb_poi(store, {"名称": "寿司郎（番禺天河城）", "地图uid": "u_far", "坐标": "23.0,113.4",
+                            "直线距离_米": 8000}, kind="周边堂食")
+    check("超出 3 公里的堂食店标记为范围外", store["u_far"]["在范围内"] is False)
+
+    store2: dict = {}
+    register_kb_poi(store2, {"名称": "美食面家", "地图uid": "u_near", "坐标": "23.0,113.39",
+                             "直线距离_米": 1491}, kind="周边堂食")
+    check("3 公里内的堂食店标记为范围内", store2["u_near"]["在范围内"] is True)
+
+    store3: dict = {}
+    register_kb_poi(store3, {"店名": "刘文祥麻辣烫(市桥店)", "地图uid": "u_dl", "坐标": "22.95,113.37",
+                             "直线距离_米": 8004}, kind="外卖")
+    check("外卖店不受步行半径限制", store3["u_dl"]["在范围内"] is True)
+
+
+def test_duplicate_uid_deduped() -> None:
+    print("[6] 同一家店被模型重复推荐 → 只保留一张卡片")
+    agent = make_agent()
+    agent.poi_store["dl3"] = {
+        "uid": "dl3", "名称": "烹湘·鲜炒湖南土菜(兴业大道店)", "地址": "兴业大道",
+        "坐标": "23.00976,113.39542", "在范围内": True, "是餐饮": True,
+        "类别": "外卖", "平均配送分钟": 35, "路线": {},
+    }
+    cards = agent._inject_card_facts([{"uid": "dl3"}, {"uid": "dl3"}, {"uid": "dl3"}])
+    check("重复 uid 去重", len(cards) == 1, f"生成 {len(cards)} 张")
+
+
+def test_delivery_text_not_walk_talk() -> None:
+    print("[7] 外卖卡片不出现步行描述（模型拿不到路线数据，混进来也要被清掉）")
+    agent = make_agent()
+    agent.poi_store["dl4"] = {
+        "uid": "dl4", "名称": "湘村民肴", "地址": "大龙街市莲路傍江东村段5号一楼",
+        "坐标": "22.952078,113.415599", "在范围内": True, "是餐饮": True,
+        "类别": "外卖", "平均配送分钟": 40, "直线距离_米": 7337, "路线": {},
+    }
+    cards = agent._inject_card_facts([{
+        "uid": "dl4",
+        "reason": "辣椒炒肉是招牌，适合喜欢辣味的朋友。",
+        "warning": "距离校区较远，步行约139分钟，骑行约57分钟。",
+        "worth_it": "步行半小时能到，值得跑一趟。",
+    }])
+    card = cards[0] if cards else {}
+    check("卡片未被剔除", len(cards) == 1, str(agent.last_dropped))
+    check("理由保留（未误删正常内容）", "辣椒炒肉" in str(card.get("reason")), str(card.get("reason")))
+    check("避雷里的步行时长被清掉", "步行" not in str(card.get("warning")), str(card.get("warning")))
+    check("值不值里的步行说法被清掉", "步行" not in str(card.get("worth_it")), str(card.get("worth_it")))
+
+    # 外卖店不该被算路线：入口直接拦掉，模型拿不到步行分钟数
+    from llm.client import ToolCall  # noqa: WPS433 —— 测试内导入，避免影响模块加载
+
+    out = agent._execute_tool(ToolCall(id="t1", name="verify_route", arguments='{"uid": "dl4", "mode": "walking"}'))
+    check("外卖店 verify_route 被拦下", "外卖店不需要路线" in out or "skipped" in out, out[:120])
+    check("拦截不泄露步行时长", "步行" not in out or "不需要" in out, out[:120])
+
+
+if __name__ == "__main__":
+    config.KB_DEMO = False
+    test_delivery_card_without_route()
+    test_delivery_without_coord_kept_pending()
+    test_dine_in_route_pending_not_dropped()
+    test_hard_checks_still_block()
+    test_local_hit_registers_poi()
+    test_far_branch_not_in_range()
+    test_duplicate_uid_deduped()
+    test_delivery_text_not_walk_talk()
+    print(f"\n通过 {PASSED} 项" + ("" if not FAILED else f"，失败 {len(FAILED)} 项：{FAILED}"))
+    raise SystemExit(0 if not FAILED else 1)

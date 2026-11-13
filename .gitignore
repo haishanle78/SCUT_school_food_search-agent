@@ -19,6 +19,12 @@ venv/
 *.zip
 _js_check.js
 
+# 数据改写前的备份（脚本自动生成，不进仓库）
+data/*.bak
+data/*.bak2
+data/kb/*.bak
+data/kb/*.bak2
+
 # 系统与编辑器
 .DS_Store
 Thumbs.db

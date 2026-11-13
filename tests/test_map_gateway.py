@@ -19,7 +19,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 
 config.MAP_ENABLED = True
-config.BAIDU_MAP_AK = config.BAIDU_MAP_AK or "test-ak"
+# 测试固定用单把假 AK：本文件验证的是「单 AK 配额耗尽后不再重复请求」，
+# 若沿用 .env 里真实的 AK 池（数量随部署变化），换 AK 重试是正确行为，
+# 断言「只调用 1 次」就会假失败。多 AK 负载均衡另有 test_concurrency 覆盖。
+config.BAIDU_MAP_AKS = ["test-ak"]
+config.BAIDU_MAP_AK = "test-ak"
+# 全程 mock 网络，不该受当天真实额度用尽的影响（否则跑一天演示后测试就挂了）
+config.MAP_DAILY_SEARCH = 10**6
+config.MAP_DAILY_ROUTE = 10**6
+# 天气模块走真实网络，单测一律关闭（本文件只测地图治理）
+config.WEATHER_ENABLED = False
 
 from agent.core import FoodAdvisorAgent  # noqa: E402
 from agent.memory import ConversationMemory, UserProfile  # noqa: E402
@@ -35,6 +44,22 @@ def ok(label: str) -> None:
     print(f"[通过] {label}")
 
 
+_USAGE_BAK = ""
+
+
+def _isolate_usage_file():
+    """把地图计数文件指到临时路径，测试不污染 data/map_usage.json。"""
+    import tempfile
+    global _USAGE_BAK
+    _USAGE_BAK = getattr(config, "MAP_USAGE_PATH", "")
+    config.MAP_USAGE_PATH = os.path.join(tempfile.mkdtemp(prefix="junshi_usage_"), "map_usage.json")
+
+
+def _restore_usage_file():
+    if _USAGE_BAK is not None:
+        config.MAP_USAGE_PATH = _USAGE_BAK
+
+
 class FakeTransport:
     """可编排的假百度：记录调用、按脚本返回 MapResult。"""
 
@@ -45,15 +70,17 @@ class FakeTransport:
 
     def __enter__(self):
         self.original = gw._do_http
-        def wrapper(path, params):
+        def wrapper(path, params, ak=None):
             self.calls.append((path, dict(params)))
             return self.handler(path, params)
         gw._do_http = wrapper
+        _isolate_usage_file()
         gw.reset_for_tests()
         return self
 
     def __exit__(self, *exc):
         gw._do_http = self.original
+        _restore_usage_file()
         gw.reset_for_tests()
 
 
@@ -89,11 +116,13 @@ def make_agent() -> FoodAdvisorAgent:
 # ---------- 验收1/2：指定店名不擅自替换 ----------
 
 def test_specified_store_not_substituted():
+    # 用不在本地知识库的店名，专测联网路径的附属设施防线
+    # （B记鱼粥现已本地命中 kb_hit 短路联网，不再适合当联网用例）
     def handler(path, params):
         query = params.get("query", "")
-        if "停车场" in query or "B记" in query:
+        if "停车场" in query or "甲记" in query:
             return gw.MapResult(gw.OK, payload={"status": 0, "results": [
-                poi("p1", "B记鱼粥-门前停车场", tag="停车场;停车位", address="荣华里-5号楼"),
+                poi("p1", "甲记鱼粥-门前停车场", tag="停车场;停车位", address="测试路5号楼"),
             ]})
         # 只有一家"相似但不同"的粥店
         return gw.MapResult(gw.OK, payload={"status": 0, "results": [
@@ -101,11 +130,11 @@ def test_specified_store_not_substituted():
         ]})
 
     with FakeTransport(handler):
-        data = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+        data = json.loads(rp.find_restaurant("甲记鱼粥", poi_store={}))
     assert data["状态"] == "auxiliary_only", f"停车场不应被当作门店: {data}"
     assert "停车场" in data["提示"] and "不能作为门店" in data["提示"]
-    assert data["uid" if "uid" in data else "店名"] == "B记鱼粥"
-    ok("验收1/2 只返回『B记鱼粥-门前停车场』时：不生成门店，如实说明并要地标")
+    assert data["店名"] == "甲记鱼粥"
+    ok("验收1/2 只返回『甲记鱼粥-门前停车场』时：不生成门店，如实说明并要地标")
 
     # 名称相近但不同：只能给候选，不能当答案
     def handler2(path, params):
@@ -114,12 +143,25 @@ def test_specified_store_not_substituted():
         ]})
 
     with FakeTransport(handler2):
-        data2 = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+        data2 = json.loads(rp.find_restaurant("甲记鱼粥", poi_store={}))
     assert data2["状态"] in ("uncertain", "no_result"), f"相似店不得直接认定为同一家: {data2}"
     assert data2["状态"] != "match", "相似店不能被判定为确认匹配"
     assert "不确定" in data2.get("提示", "") or "不能确认" in data2.get("提示", "")
-    assert "B记鱼粥" in json.dumps(data2, ensure_ascii=False)
+    assert "甲记鱼粥" in json.dumps(data2, ensure_ascii=False)
     ok("验收1 指定店名查不到时：不替换成恒源客家佬粥粉面，候选人需用户确认")
+
+    # 本地库已有核实坐标的店（B记鱼粥）应直接 kb_hit，短路联网
+    data3 = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+    assert data3["状态"] == "kb_hit", f"本地已核实的店应 kb_hit: {data3}"
+    assert data3.get("坐标"), "kb_hit 应带坐标"
+    ok("验收1/3 本地库已核实门店：kb_hit 短路联网")
+
+    # 带分店后缀的店：只说核心名也要能本地命中（「寿司郎」↔「寿司郎（番禺天河城）」）。
+    # 相似度算法对 3 字 vs 9 字只有 0.3，靠核心名匹配兜底，否则会白跑一次联网。
+    data4 = json.loads(rp.find_restaurant("寿司郎", poi_store={}))
+    assert data4["状态"] == "kb_hit", f"带分店后缀应核心名命中 kb_hit: {data4}"
+    assert "天河城" in str(data4.get("名称")), data4
+    ok("验收1/4 带分店后缀门店：只说核心名也能 kb_hit")
 
 
 # ---------- 验收3：限流/配额要如实说明，不能说门店不存在 ----------
@@ -218,6 +260,11 @@ def test_card_validation():
         "noroute": {"uid": "noroute", "名称": "未核实路线店", "地址": "番禺", "行政区": "番禺区", "坐标": "23.018,113.412",
                     "直线距离_米": 700, "是餐饮": True, "在范围内": True},
     })
+    # 关掉自动补查，明确模拟「有坐标但路线接口也拿不到」的情况（不发真实请求）
+    agent._auto_verify_route = lambda uid, modes: {}
+    # 本用例语境是「附近推荐」：用户明确要附近时，超范围仍然剔除
+    agent._nearby_strict = True
+
     cards = agent._inject_card_facts([
         {"uid": "ok1", "cuisine": "粥", "reason": "近"},
         {"uid": "far1", "cuisine": "粤菜", "reason": "跨区"},
@@ -225,10 +272,17 @@ def test_card_validation():
         {"uid": "noroute", "cuisine": "粥", "reason": "没路线"},
         {"uid": "ghost", "cuisine": "粥", "reason": "编造"},
     ])
-    assert [c["uid"] for c in cards] == ["ok1"], f"只有合规卡片能通过: {[c['uid'] for c in cards]}"
+    # 硬校验（身份/餐饮/范围）仍然拦截；路线缺失改为「保留 + 标待核实」，
+    # 因为路线是增强信息不是推荐资格——否则模型漏调 verify_route 时整批卡片会消失。
+    assert [c["uid"] for c in cards] == ["ok1", "noroute"], f"卡片集合不对: {[c['uid'] for c in cards]}"
     reasons = " ".join(d["原因"] for d in agent.last_dropped)
-    assert "超出" in reasons and "附属设施" in reasons and "路线未核实" in reasons and "未核实" in reasons
-    ok("验收7 超范围/附属设施/路线未核实/uid 编造：全部被后端拦截")
+    assert "超出" in reasons and "附属设施" in reasons and "未核实" in reasons
+    ok("验收7 超范围/附属设施/uid 编造：硬性拦截")
+
+    pending = [c for c in cards if c["uid"] == "noroute"][0]
+    assert pending["route_pending"] is True and pending["route_verified"] is False, str(pending)
+    assert pending["transport"].get("路线状态", "").startswith("待核实"), str(pending["transport"])
+    ok("验收7a 路线查不到：卡片保留但标『路线待核实』，不冒充已核实")
 
     card = cards[0]
     assert card["identity_verified"] and card["route_verified"]
@@ -282,8 +336,35 @@ def test_global_rate_limit():
         config.MAP_QPS, config.MAP_MAX_WAIT = old_qps, old_wait
 
 
+# ---------- 验收1c：知识库有资料但无坐标 ----------
+
+def test_kb_no_coord() -> None:
+    # 不能拿真实库里的店来测：B记鱼粥 现在已经补到坐标了，会走 kb_hit。
+    # 用 mock 造一条「有资料、无坐标、且地图也补不到坐标」的记录，测的是分支逻辑本身。
+    original_kb = rp._kb_lookup
+    original_fill = rp._coord_from_suggestion
+    rp._kb_lookup = lambda name: {
+        "名称": "无坐标测试店", "正式名称": "无坐标测试店", "类别": "周边堂食",
+        "坐标": "", "地址": "", "人均": 37, "交通": {"步行": 20},
+        "一句话点评": "测试用", "测评来源": "攻略整理",
+    }
+    rp._coord_from_suggestion = lambda name: None  # 模拟输入提示也补不到
+    try:
+        data = json.loads(rp.find_restaurant("无坐标测试店", poi_store={}))
+    finally:
+        rp._kb_lookup = original_kb
+        rp._coord_from_suggestion = original_fill
+    assert data["状态"] == "kb_no_coord", f"应识别为『有资料无坐标』: {data}"
+    assert data.get("坐标") is None and data.get("地址") == "待确认"
+    assert "导航" in data["提示"] or "位置待确认" in data["要求"]
+    assert "不要替换" in data["要求"], "必须明确禁止换成别的店"
+    assert "攻略步行参考" in data and "未经路线接口核实" in data["攻略步行参考"]
+    ok("验收1c 知识库有资料但无坐标：展示资料 + 标注待核实，不给导航、不替换")
+
+
 if __name__ == "__main__":
     test_specified_store_not_substituted()
+    test_kb_no_coord()
     test_rate_limit_and_quota_messages()
     test_cache_and_modes()
     test_single_flight()

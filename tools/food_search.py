@@ -1,18 +1,110 @@
-"""美食检索官：在本地知识库中按条件筛选。
+"""美食检索官：先查本地知识库，无匹配时自动联网（百度地图）检索。
 
-数据来源（合规）：大众点评/小红书内容的人工整理 + 学生问卷实测。
+数据来源（合规）：
+  - 本地知识库：大众点评/小红书内容的人工整理 + 学生问卷实测；
+  - 联网兜底：百度地图地点检索（出发点 3 公里内真实门店，带 uid/坐标）。
 示例数据已隔离到 data/examples/（仅作字段模板参考），正式推荐
-只使用 data/ 下的真实数据——没有真实数据时明确说明并引导联网，
-绝不返回示例数据冒充真实门店。
+只使用 data/ 下的真实数据与地图实时返回的门店，绝不返回示例数据冒充真实门店。
+
+检索顺序：
+  1. 本地知识库有匹配 → 只返回本地结果（不消耗地图额度）；
+  2. 本地无匹配且有关键词 → 自动调 search_poi 联网检索，返回真实门店
+     （写入会话 poi_store，后续 verify_route / 推荐卡片用同一 uid 引用）；
+  3. 联网失败（限流/配额/网络）→ 如实返回状态说明，不编造门店。
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import config
+from tools.kb_index import SYNONYMS
+
+# 场景词不参与菜系/品类匹配：『外卖』说的是怎么吃，不是吃什么。
+# 历史包袱：这些词曾被塞进 query，现在统一转到 dining_mode，但仍要兜住老调用。
+_SCENE_WORDS = {"外卖", "外卖推荐", "聚餐", "聚会"}
+_DELIVERY_WORDS = {"外卖", "外卖推荐", "delivery", "deliver", "takeout", "takeaway", "配送"}
+_DINE_IN_WORDS = {"堂食", "到店", "dine_in", "dinein", "in_store", "到店吃"}
+
+# 菜系/品类别名表：左边是检索用的标准词，右边是用户可能说的各种叫法。
+# 为什么需要它：离线兜底只能靠规则解析用户原话，之前只认「辣/清淡」这类口味词，
+# 完全没有菜系概念，于是「有日料的外卖推荐吗」解析出的 query 是空——
+# 没有品类条件，检索就直接返回全部外卖店（酸菜鱼、面馆），看着像乱推。
+CUISINE_ALIASES = (
+    ("日本料理", ("日料", "日本料理", "寿司", "刺身", "居酒屋", "日式", "鳗鱼")),
+    ("汉堡", ("汉堡", "漢堡", "burger")),
+    ("披萨", ("披萨", "比萨", "pizza")),
+    ("炸鸡", ("炸鸡",)),
+    ("烧烤", ("烧烤", "烤肉", "撸串")),
+    ("火锅", ("火锅", "打边炉")),
+    ("粥", ("粥", "砂锅粥")),
+    ("粉面", ("粉面", "面馆", "面条", "拉面", "米线", "米粉", "河粉", "云吞")),
+    ("粤菜", ("粤菜", "广东菜", "广府菜")),
+    ("湘菜", ("湘菜", "湖南菜")),
+    ("川菜", ("川菜", "四川菜", "酸菜鱼", "水煮")),
+    ("烧腊", ("烧腊", "烧鸭", "烧鹅", "叉烧")),
+    ("麻辣烫", ("麻辣烫", "冒菜")),
+    ("饺子", ("饺子", "水饺", "锅贴")),
+    ("奶茶", ("奶茶", "果茶")),
+    ("咖啡", ("咖啡",)),
+    ("快餐", ("快餐", "简餐", "便当")),
+    ("东南亚菜", ("泰国菜", "越南菜", "咖喱", "东南亚")),
+)
+
+
+def detect_cuisine(text: str) -> str:
+    """从用户原话里认出菜系/品类，返回检索用的标准词（认不出返回空串）。
+
+    只做「用户明确说了某品类」的识别，不猜、不扩展——
+    用户没提品类就让 query 为空，宁可多问一句，也不替他决定吃什么。
+    """
+    raw = (text or "").lower()
+    if not raw:
+        return ""
+    # 命中多个时取最先出现的那个，更符合用户语序里的重点
+    best, best_pos = "", len(raw)
+    for canonical, aliases in CUISINE_ALIASES:
+        for alias in aliases:
+            pos = raw.find(alias.lower())
+            if pos != -1 and pos < best_pos:
+                best, best_pos = canonical, pos
+    return best
+
+
+def expand_query_terms(query: str) -> list[str]:
+    """把 query 展开成同义组，用于本地知识库匹配。
+
+    知识库里可能写「日料」而标准词是「日本料理」，只认一种写法会漏掉大量记录。
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    terms = [q]
+    for canonical, aliases in CUISINE_ALIASES:
+        group = {canonical.lower(), *(a.lower() for a in aliases)}
+        if q in group:
+            terms = sorted(group)
+            break
+    return terms
+
+
+def normalize_dining_mode(value: str) -> str:
+    """把各种口语/英文写法收敛成 delivery / dine_in / 空（未指定）。
+
+    未指定 ≠ 堂食：用户没提用餐方式时，两种店都可以进候选，
+    卡片再按实际门店类别决定要不要核实路线。
+    """
+    text = (value or "").strip().lower()
+    if not text:
+        return ""
+    if text in _DELIVERY_WORDS or "外卖" in text:
+        return "delivery"
+    if text in _DINE_IN_WORDS or "堂食" in text or "到店" in text:
+        return "dine_in"
+    return ""
 
 
 def _load(path: str) -> List[Dict[str, Any]]:
@@ -27,13 +119,66 @@ def _load(path: str) -> List[Dict[str, Any]]:
 
 
 def _find_place(place_name: str) -> Dict[str, Any] | None:
-    """按名称在真实知识库（周边餐厅+饭堂）中查找门店。"""
-    for path in (config.RESTAURANTS_PATH, config.CANTEEN_PATH):
+    """按名称在真实知识库（周边餐厅+饭堂窗口+外卖）中查找门店。"""
+    for path, kind in (
+        (config.RESTAURANTS_PATH, "周边堂食"),
+        (config.CANTEEN_PATH, "饭堂窗口"),
+        (config.DELIVERY_PATH, "外卖"),
+    ):
         for item in _load(path):
             name = item.get("名称") or item.get("店名") or item.get("窗口名")
             if place_name in str(name or ""):
-                return item
+                hit = dict(item)
+                hit.setdefault("类别", kind)
+                return hit
     return None
+
+
+# 用户问店时常见的疑问尾巴：「达海美食怎么样」「小意司日料多少钱」
+_QUESTION_TAIL_RE = re.compile(
+    r"(怎么样|怎么样啊|好不好吃|好吃吗|好吃不|如何|介绍一下|介绍下|介绍|评价|口碑|"
+    r"在哪|怎么走|怎么去|人均多少|人均|多少钱|值得去吗|值得|靠谱吗|推荐吗|好吃)$"
+)
+_QUESTION_HEAD_RE = re.compile(r"^(请问|想问下|想问一下|问一下|帮我看看|你知道)")
+
+
+def _strip_question(query: str) -> str:
+    """把「达海美食怎么样」这类问句还原成店名。"""
+    q = str(query or "").strip()
+    q = _QUESTION_HEAD_RE.sub("", q)
+    for _ in range(2):  # 「怎么样啊」「多少钱呀」可能叠两层
+        q = _QUESTION_TAIL_RE.sub("", q).strip()
+    return q.strip(" ，,。?？!！")
+
+
+def _match_store_by_name(query: str) -> List[Dict[str, Any]]:
+    """按店名精确命中：用户问的是某一家店时，不该被场景互斥/关键词子串卡掉。
+
+    背景：这里的匹配原来是「整个 query 是文本子串」，于是
+      - 「达海美食怎么样」→ 0 命中；
+      - 「小意司日料」→ 名字对得上，但它是外卖店，被场景互斥排掉，最后跑去联网
+        匹配到一家美容院。
+    用户点名某家店时，正确行为是直接把这家店的事实返回。
+    """
+    q = _strip_question(query)
+    if len(q) < 2:
+        return []
+    hits: List[Dict[str, Any]] = []
+    for p in _all_places():
+        name = str(p.get("名称") or p.get("店名") or p.get("窗口名") or "")
+        if not name:
+            continue
+        # 短名（2 字）只认全等，避免「美食」这类通用词把半个库捞出来
+        exact = name == q
+        contains = len(q) >= 3 and (name in q or q in name)
+        if exact or contains:
+            hits.append(p)
+    hits.sort(key=lambda p: (
+        0 if str(p.get("名称") or p.get("店名") or p.get("窗口名")) == q else 1,
+        len(str(p.get("名称") or p.get("店名") or p.get("窗口名"))),
+    ))
+    return hits[:3]
+
 
 
 def _all_places() -> List[Dict[str, Any]]:
@@ -55,31 +200,165 @@ def _all_places() -> List[Dict[str, Any]]:
 
     for item in _load(config.DELIVERY_PATH):
         entry = dict(item)
-        entry.setdefault("交通", {"步行": 0})
+        # 外卖没有「步行 X 分钟」这回事。曾经这里默认填 {"步行": 0}，
+        # 前端就渲染成「步行 0 分钟」——一个凭空捏造的事实。
+        # 现在干脆不给交通字段：没有数据就没有，卡片只显示配送参考。
+        entry.pop("交通", None)
         entry["类别"] = "外卖"
         places.append(entry)
 
     return places
 
 
-def _match(item: Dict[str, Any], query: str, taste: str, budget_max: float | None, max_minutes: int | None) -> bool:
+def _taste_terms(taste: str) -> List[str]:
+    """把模型给的口语口味词归一成知识库里可能出现的词。
+
+    小模型经常把「推荐几个外卖」传成 taste="爱辣"（用户根本没提口味），
+    或者把「想吃点清淡的」传成 taste="清淡点"。这里用 SYNONYMS 做一次扩展：
+    「爱辣」→ 辣/麻辣/香辣/重口/川菜/湘菜，任一词命中即算匹配。
+    认不出的词保留原样（下面还有「全灭则放宽」兜底，不会死锁）。
+    """
+    text = (taste or "").strip().lower()
+    if not text:
+        return []
+    terms: List[str] = []
+    for key, alts in SYNONYMS.items():
+        if key and key in text:
+            terms.append(key)
+            terms.extend(alts)
+    return terms or [text]
+
+
+def _is_taste_word(term: str) -> bool:
+    """判断是不是纯口味/需求词（这类词拿去地图检索没有意义）。"""
+    return any(key and key in (term or "") for key in SYNONYMS)
+
+
+def _walk_minutes(item: Dict[str, Any]) -> int | None:
+    """取「已核实的步行分钟数」；0 / 缺失 / 乱码一律当作「未核实」返回 None。
+
+    ★ 0 不是「0 分钟就到」，是这条记录没填步行时间。
+    知识库里 43/54 家堂食没有步行数据，把它当 0 会让「步行 5 分钟内」搜出全城，
+    当 999 又会把真正 3 分钟的店一起滤掉。所以它既不能进、也不能出，只能「未知」。
+    """
+    walk = (item.get("交通") or {}).get("步行")
+    if walk in (None, "", 0, "0"):
+        return None
+    try:
+        value = int(float(walk))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _walk_within_limit(item: Dict[str, Any], max_minutes: int | None, want_delivery: bool) -> bool:
+    """「步行上限」的严格判定：只有核实过、且确实没超，才算符合。
+
+    和 _match 的分工：
+      _match 宽松——未知的保留，让用户看到「有这家店，步行待确认」；
+      本函数严格——只有它敢说「符合 15 分钟」。放宽口味/放宽预算这类
+      「本来就已经让了一步」的兜底列表，必须用严格版，否则拿未核实的距离
+      凑出来的结果，用户走一趟才发现要 40 分钟。
+    """
+    if max_minutes is None or want_delivery:
+        return True
+    walk = _walk_minutes(item)
+    return walk is not None and walk <= int(max_minutes)
+
+
+def _taste_in_other_scene(
+    places: List[Dict[str, Any]],
+    query: str,
+    terms: List[str],
+    budget_max: float | None,
+    want_delivery: bool,
+) -> List[Dict[str, Any]]:
+    """当前场景没有的口味，是不是「装在了另一个场景里」。
+
+    真实案例：用户说「想吃辣的，30 以内，步行 15 分钟」，堂食库里一家辣味都没有
+    （3 家辣味店全在外卖库），而放宽口味后的兜底把一家 12 公里外、评分 1 分、
+    没有步行数据的店捞出来当推荐。正确的回答是「堂食没有，外卖有这 3 家」。
+    """
+    opposite = [
+        p
+        for p in places
+        if str(p.get("类别") or "") == ("饭堂窗口" if want_delivery else "外卖")
+    ]
+    # 外卖库的条目天然「可外卖」，用它自己的场景去匹配，才能过 _match 的场景互斥
+    hits = [
+        p
+        for p in opposite
+        if _match(p, query, terms, budget_max, None, not want_delivery, "dine_in" if want_delivery else "delivery")
+    ]
+    hits.sort(key=lambda p: -float(p.get("学生评分", 0) or 0))
+    return hits[:5]
+
+
+def _describe_places(items: List[Dict[str, Any]]) -> str:
+    """把店名列成「A（人均 28 元，评分 3.8）、B…」——报价给人看也够精确。"""
+    bits = []
+    for p in items:
+        name = p.get("名称") or p.get("店名") or p.get("窗口名")
+        price = p.get("人均")
+        score = p.get("学生评分")
+        extra = []
+        if price not in (None, ""):
+            extra.append(f"人均{price}元")
+        if score not in (None, ""):
+            extra.append(f"评分{score}")
+        bits.append(f"{name}（{'，'.join(extra)}）" if extra else str(name))
+    return "、".join(bits)
+
+
+def _match(
+    item: Dict[str, Any],
+    query: str,
+    taste_terms: List[str],
+    budget_max: float | None,
+    max_minutes: int | None,
+    want_delivery: bool,
+    dining_mode: str,
+) -> bool:
+    kind = str(item.get("类别") or "")
+    is_delivery_store = kind == "外卖"
+
+    # 场景互斥：用户没说要外卖时，外卖店不进结果。
+    # 否则「辣的、步行15分钟」会把外卖店排到前面——外卖店没有步行字段，
+    # 天然绕过时间筛选，堂食推荐会被挤掉。
+    if is_delivery_store and not want_delivery:
+        return False
+
+    # 饭堂窗口是明确不能配送的堂食档口，点外卖时不该混进来。
+    # 周边堂食 / 联网检索则保留：地图上的店不代表不能送，只是后端没有配送依据，
+    # 卡片会标「配送能力待确认」——既不武断排除，也不假装已确认。
+    if want_delivery and kind == "饭堂窗口":
+        return False
+
     if budget_max is not None:
         try:
             if float(item.get("人均", 0)) > float(budget_max):
                 return False
         except (TypeError, ValueError):
             pass
-    if max_minutes is not None:
-        try:
-            walk = int(item.get("交通", {}).get("步行", 999))
-            if item.get("类别") != "外卖" and walk > int(max_minutes):
-                return False
-        except (TypeError, ValueError):
-            pass
 
-    if query in {"外卖", "外卖推荐"}:
-        if not item.get("可外卖") and item.get("类别") != "外卖":
-            return False
+    # 步行上限只对堂食有意义：外卖不走路，拿步行分钟筛外卖是错的。
+    if max_minutes is not None and not want_delivery:
+        # 数据里「步行 = 0 / 缺失」表示「未核实」，不是真的 0 分钟，也不是 999 分钟。
+        # 不能因此把店筛掉——那是数据缺口，不是距离事实。
+        # 只有明确测得超过上限的才排除；未知的保留，由卡片/正文标「步行时间待确认」。
+        walk_raw = (item.get("交通") or {}).get("步行")
+        if walk_raw not in (None, 0):
+            try:
+                if int(walk_raw) > int(max_minutes):
+                    return False
+            except (TypeError, ValueError):
+                pass
+
+    # 只有「私域外卖库」里明确标注不可外卖的店才排除；
+    # 其他店配送能力未知，交给卡片标注，不在这里一刀切。
+    if want_delivery and is_delivery_store and item.get("可外卖") is False:
+        return False
+
     if query in {"聚餐", "聚会"}:
         try:
             if int(item.get("适合聚餐人数", 0) or 0) < 4:
@@ -87,66 +366,356 @@ def _match(item: Dict[str, Any], query: str, taste: str, budget_max: float | Non
         except (TypeError, ValueError):
             return False
 
-    # 关键词/口味匹配：店名、菜系、招牌菜、标签、一句话点评
+    # 关键词匹配：店名、菜系、招牌菜、标签、一句话点评
     # （"外卖/聚餐/聚会"是场景词而非内容词，上面已按场景字段过滤，这里跳过）
-    if query and query not in {"外卖", "外卖推荐", "聚餐", "聚会"}:
+    if query and query not in _SCENE_WORDS:
         haystack = " ".join(
             str(item.get(field, ""))
             for field in ("名称", "店名", "窗口名", "菜系", "一句话点评", "口味标签")
         ) + " " + " ".join(str(x) for x in item.get("招牌菜", []) or [])
-        if query.lower() not in haystack.lower():
+        # 按同义组匹配：标准词「日本料理」要能命中知识库里的「日料」/「寿司」
+        terms_q = expand_query_terms(query)
+        hay_low = haystack.lower()
+        if not any(t in hay_low for t in terms_q) and hay_low not in query.lower():
             return False
 
-    if taste:
+    if taste_terms:
         tag = f"{item.get('菜系', '')}{' '.join(str(t) for t in item.get('口味标签', []) or [])}{item.get('一句话点评', '')}"
-        if taste not in tag:
+        if not any(term in tag for term in taste_terms):
             return False
     return True
 
 
-def food_search(query: str, taste: str = "", budget_max: float | None = None, max_minutes: int | None = None) -> str:
-    """检索知识库，返回 Top5（按学生评分降序、步行时间升序）。"""
+# ---------------- 联网兜底（百度地图） ----------------
+
+
+def _online_fallback(keyword: str, poi_store: Optional[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """联网检索兜底。返回 (在线条目列表, 状态说明)；说明非 None 表示联网不可用/无结果。"""
+    from tools import route_planner as rp  # 惰性导入，避免包初始化顺序问题
+
+    try:
+        raw = rp.search_poi(keyword, poi_store=poi_store if poi_store is not None else {})
+        data = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001 —— 联网失败不能拖垮本地检索
+        return [], f"联网检索异常：{exc}"
+    if data.get("状态") != "ok":
+        note = data.get("提示") or data.get("建议") or "联网检索暂不可用"
+        return [], note
+    return data.get("结果") or [], None
+
+
+def food_search(
+    query: str = "",
+    taste: str = "",
+    dining_mode: str = "",
+    budget_max: float | None = None,
+    max_minutes: int | None = None,
+    poi_store: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> str:
+    """先查本地知识库；无匹配时自动联网（百度地图 3 公里内真实门店）。
+
+    三个维度各管一件事，绝不混用：
+      query       —— 吃什么品类（汉堡/日料/粥/粤菜），只管菜系
+      taste       —— 什么口味（辣/清淡/甜），只管口味
+      dining_mode —— 怎么吃（delivery 外卖 / dine_in 到店 / 空 未指定），只管场景
+
+    本地结果按学生评分降序、步行时间升序；联网结果按直线距离升序，带 uid。
+    """
+    raw_query = (query or "").strip()
+    raw_taste = (taste or "").strip()
+    mode = normalize_dining_mode(dining_mode)
+    # 向后兼容/纠错：模型常把场景词塞进 query 或 taste（截图里就出现过
+    # query="日本料理", taste="外卖"）。场景词必须转到 dining_mode，
+    # 否则 taste="外卖" 会被拿去当口味标签匹配，一条都命中不了。
+    for slot in ("query", "taste"):
+        raw = raw_query if slot == "query" else raw_taste
+        if raw in _SCENE_WORDS:
+            if "外卖" in raw and not mode:
+                mode = "delivery"
+            raw = "" if "外卖" in raw else raw
+            if slot == "query":
+                raw_query = raw
+            else:
+                raw_taste = raw
+    query, taste = raw_query, raw_taste
+    want_delivery = mode == "delivery"
+
     if budget_max is not None:
         budget_max = float(budget_max)
-    if max_minutes is not None:
+    # 外卖不走路：用户若顺手给了步行上限，对外卖场景直接忽略，避免拿它筛掉可送的店
+    if max_minutes is not None and not want_delivery:
         max_minutes = int(max_minutes)
+    elif want_delivery:
+        max_minutes = None
 
-    hits = [p for p in _all_places() if _match(p, query, taste, budget_max, max_minutes)]
-    hits.sort(key=lambda p: (-float(p.get("学生评分", 0) or 0), int(p.get("交通", {}).get("步行", 0) or 0)))
+    places = _all_places()
+    terms = _taste_terms(taste)
+    # 用户点名某一家店（「达海美食怎么样」「小意司日料多少钱」）：
+    # 直接返回这家店的事实，不走品类筛选，也不受场景互斥影响——
+    # 用户问的是这一家，就不该因为它在堂食/外卖库里而搜不到。
+    named = _match_store_by_name(query)
 
-    if not hits:
-        if not _all_places():
-            return json.dumps(
-                {
-                    "提示": "本地知识库暂无真实数据（示例数据已隔离，不用于正式推荐）",
-                    "下一步": "必须改用 search_poi 联网检索周边真实门店，检索结果会带 uid/地址/坐标/距离，再用 verify_route 核实路线",
-                },
-                ensure_ascii=False,
+    hits = named or [p for p in places if _match(p, query, terms, budget_max, max_minutes, want_delivery, mode)]
+    taste_relaxed = ""
+    taste_elsewhere: List[Dict[str, Any]] = []
+    if not hits and terms:
+        # 第 0 步：先问「这个口味是不是装在另一个场景里」。
+        # 堂食 15 分钟内没有辣味，不代表用户吃不上辣——外卖库里有 3 家。
+        # 这时候实话比兜底有用，也避免把一家 12 公里外、评分 1 分的店当成推荐。
+        taste_elsewhere = _taste_in_other_scene(places, query, terms, budget_max, want_delivery)
+    if not hits and terms and not taste_elsewhere:
+        # 口味词把结果全灭了：可能是模型自己加的口味（用户原话里并没有），
+        # 或者知识库还没有这个口味标签。此时放宽【口味】给结果，但绝不放宽菜系——
+        # 用户明确要汉堡，就不能拿酸菜鱼凑数。
+        # ★ 也绝不放宽「距离」：步行时间没核实过的店，不能算进「步行 15 分钟内」。
+        hits = [
+            p
+            for p in places
+            if _match(p, query, [], budget_max, max_minutes, want_delivery, mode)
+            and _walk_within_limit(p, max_minutes, want_delivery)
+        ]
+        if hits:
+            taste_relaxed = (
+                f"没有严格符合「{taste}」口味的门店，以下结果已放宽【口味】约束"
+                + (f"，但「{query}」这个菜系条件没有放宽" if query else "")
+                + "。请在回答里说明这一点并询问用户是否接受，不要假装完全符合。"
             )
+    if want_delivery:
+        # 外卖的优先级和堂食相反：先看能不能送到（距离），再看评分。
+        # 按评分排会把 7 公里外的店排第一，学生点外卖第一眼关心的是「多久能到」。
+        hits.sort(key=lambda p: (
+            int(p.get("直线距离_米") or 99999),
+            -float(p.get("学生评分", 0) or 0),
+        ))
+    elif not named:
+        if max_minutes is not None and not want_delivery:
+            # 用户给了步行上限时，核实过分钟数的店排前面：
+            # 「有步行数据、确实在 15 分钟内」比「评分高但不知道多远」更该被先看到。
+            hits.sort(
+                key=lambda p: (
+                    0 if _walk_minutes(p) is not None else 1,
+                    -float(p.get("学生评分", 0) or 0),
+                    _walk_minutes(p) or 999,
+                )
+            )
+        else:
+            hits.sort(key=lambda p: (-float(p.get("学生评分", 0) or 0), _walk_minutes(p) or 0))
+
+    # ---- ① 本地有匹配：只返回本地结果，不消耗地图额度 ----
+    if hits:
+        # 本地店也要登记进 poi_store：它们不经过 search_poi，不登记的话
+        # format_recommendation 会判成「uid 未核实」把整批卡片剔除。
+        if poi_store is not None:
+            from tools.route_planner import register_kb_poi
+
+            for p in hits[:8]:
+                # register_kb_poi 会返回真实 uid 或合成 uid（知识库条目没有地图点位时）。
+                # 必须写回结果里，否则返回的 uid 是 None，模型就没法调 format_recommendation
+                # 出卡片——这正是「库里有 5 家日料、一张卡都没有」的直接原因。
+                uid = register_kb_poi(poi_store, p, kind=str(p.get("类别") or ""))
+                if uid:
+                    p["_resolved_uid"] = uid
+        unknown_walk = (
+            max_minutes is not None
+            and not want_delivery
+            and any(_walk_minutes(p) is None for p in hits[:5])
+        )
         return json.dumps(
-            {"提示": "知识库有真实数据但无匹配结果", "建议": "可用 search_poi 联网搜索，或放宽口味/预算/时间约束"},
+            {
+                "用餐方式": mode or "未指定",
+                **({"口味说明": taste_relaxed, "需询问用户": True} if taste_relaxed else {}),
+                **(
+                    {
+                        "步行说明": "结果里有门店的步行时间未核实（知识库缺这条数据），"
+                        "只能说「步行时间待确认」，不能说成「步行 X 分钟内」；"
+                        "已经核实过的门店优先推荐"
+                    }
+                    if unknown_walk
+                    else {}
+                ),
+                **(
+                    {
+                        "匹配方式": "按店名命中：用户问的是这一家店，直接用知识库记录回答，"
+                        "只讲这里有的字段，没写的（菜品细节、环境、营业时间）不要编"
+                    }
+                    if named
+                    else {}
+                ),
+                "结果": [
+                    {
+                        "名称": p.get("名称") or p.get("店名") or p.get("窗口名"),
+                        "类别": p.get("类别"),
+                        "菜系": p.get("菜系"),
+                        "人均": p.get("人均"),
+                        "招牌菜": p.get("招牌菜"),
+                        # 外卖不提供步行交通：填 0 会被前端渲染成「步行 0 分钟」，是假事实
+                        "交通": None if want_delivery else p.get("交通"),
+                        "地址": p.get("地址"),
+                        "营业时间": p.get("营业时间"),
+                        "高峰时段": p.get("高峰时段"),
+                        "适合聚餐人数": p.get("适合聚餐人数"),
+                        "学生评分": p.get("学生评分"),
+                        "避雷": p.get("避雷"),
+                        "一句话点评": p.get("一句话点评"),
+                        "可外卖": p.get("可外卖"),
+                        "平均配送分钟": p.get("平均配送分钟"),
+                        "配送说明": "配送能力/费用/时长未核实，需标待确认" if want_delivery else None,
+                        # 私域外卖的下单入口（微信群/小红书号），没有地图 POI 也能告诉用户怎么买
+                        "下单方式": p.get("下单方式"),
+                        # 真实地图 uid，或知识库条目的合成 uid（无地图点位时）
+                        "uid": p.get("地图uid") or p.get("_resolved_uid"),
+                        "坐标": p.get("坐标"),
+                        "商圈": p.get("商圈"),
+                        "来源": "知识库",
+                    }
+                    for p in hits[:5]
+                ]
+            },
             ensure_ascii=False,
         )
 
-    return json.dumps(
-        {
+    # ---- ② 本地无匹配：自动联网兜底（仅限可搜索的具体关键词） ----
+    # 口味/需求词（辣、清淡、便宜…）不是地图能检索的品类，拿它联网只会白烧额度，
+    # 还会返回「出发点 3 公里内没有『爱辣』的餐饮门店」这种没用的结论。
+    if query and query not in _SCENE_WORDS:
+        online_kw = query
+    elif taste and not _is_taste_word(taste):
+        online_kw = taste
+    else:
+        online_kw = ""
+    online_items: List[Dict[str, Any]] = []
+    online_note: Optional[str] = None
+    if online_kw and config.MAP_ENABLED:
+        online_items, online_note = _online_fallback(online_kw, poi_store)
+
+    if online_items:
+        out: Dict[str, Any] = {
+            "用餐方式": mode or "未指定",
+            "联网检索": f"知识库无「{online_kw}」匹配，已自动联网检索百度地图（出发点 3 公里内真实门店）",
             "结果": [
                 {
-                    "名称": p.get("名称") or p.get("店名") or p.get("窗口名"),
-                    "类别": p.get("类别"),
-                    "菜系": p.get("菜系"),
-                    "人均": p.get("人均"),
-                    "招牌菜": p.get("招牌菜"),
-                    "交通": p.get("交通"),
-                    "营业时间": p.get("营业时间"),
-                    "高峰时段": p.get("高峰时段"),
-                    "适合聚餐人数": p.get("适合聚餐人数"),
-                    "学生评分": p.get("学生评分"),
-                    "避雷": p.get("避雷"),
-                    "一句话点评": p.get("一句话点评"),
+                    "名称": it.get("名称"),
+                    # 类别保持事实：「联网检索」不等于「可配送」，两者不能混为一谈
+                    "类别": "联网检索",
+                    "菜系": it.get("查询品类") or online_kw,
+                    "人均": None,
+                    "地址": it.get("地址"),
+                    "直线距离_米": it.get("直线距离_米"),
+                    "坐标": it.get("坐标"),
+                    "uid": it.get("uid"),
+                    "可外卖": None,
+                    "来源": "联网（百度地图）",
                 }
-                for p in hits[:5]
+                for it in online_items[:8]
+            ],
+        }
+        if want_delivery:
+            # 关键事实边界：地图搜到这家店 ≠ 确认它送外卖。
+            # 措辞尽量中性，避免模型把「不要编造」这类内部指令原样念给用户。
+            out["配送提示"] = (
+                "这些门店来自地图检索，只能说明店铺存在。"
+                "配送能力、配送费、配送时长均未核实，统一标「待确认」。"
+            )
+        elif budget_max is not None:
+            out["联网检索"] += "（联网结果未按预算筛选，请按需核实后再推荐）"
+        return json.dumps(out, ensure_ascii=False)
+
+    # ---- ②.5 本地其实有，只是被预算/时间筛掉了：把差在哪、放宽多少说清楚 ----
+    # 用户看到「查不到」时最需要知道的是「放宽哪个条件就能吃上」，
+    # 而不是一句「可放宽口味/预算/时间约束」的套话。
+    relaxed: Dict[str, Any] = {}
+    if budget_max is not None:
+        # 注意：_match 必须带 want_delivery / dining_mode，
+        # 否则这里抛 TypeError，整个「放宽建议」分支直接崩溃降级成联网搜「辣」，
+        # 用户看到的就是一堆毫不相关的肠粉店。
+        wider_budget = [p for p in places if _match(p, query, terms, None, max_minutes, want_delivery, mode)]
+        if wider_budget:
+            wider_budget.sort(key=lambda p: float(p.get("人均", 0) or 0))
+            relaxed["放宽预算"] = [
+                f"{p.get('名称') or p.get('店名')}（人均{p.get('人均')}元，超出上限{budget_max:g}元）"
+                for p in wider_budget[:3]
             ]
-        },
-        ensure_ascii=False,
-    )
+    if max_minutes is not None:
+        wider_time = [p for p in places if _match(p, query, terms, budget_max, None, want_delivery, mode)]
+        if wider_time:
+            wider_time.sort(key=lambda p: int((p.get("交通") or {}).get("步行", 999) or 999))
+            relaxed["放宽时间"] = [
+                f"{p.get('名称') or p.get('店名')}（步行{(p.get('交通') or {}).get('步行')}分钟，超出上限{max_minutes}分钟）"
+                for p in wider_time[:3]
+            ]
+    if relaxed:
+        relaxed["要求"] = (
+            "这些店在本地知识库里确实存在，只是超出了用户设的预算/时间上限；"
+            "只能作为「放宽条件后可以去」的替代方案说明，不要说成符合条件，也别说成没有这家店。"
+        )
+
+    # 场景互斥会把外卖店挡在堂食结果之外：用户问「肠粉」时，外卖库里的普宁肠粉不会出现。
+    # 这里补一句提示，让模型知道「不是没有，是场景没对上」。
+    delivery_hits: List[str] = []
+    if query and query not in {"外卖", "外卖推荐", "聚餐", "聚会"}:
+        for item in _load(config.DELIVERY_PATH):
+            hay = " ".join(str(item.get(f, "")) for f in ("店名", "菜系", "一句话点评"))
+            hay += " " + " ".join(str(x) for x in item.get("招牌菜") or [])
+            if query in hay:
+                name = str(item.get("店名") or "")
+                if name:
+                    delivery_hits.append(name)
+    if delivery_hits:
+        relaxed["外卖库里有"] = (
+            f"「{query}」在外卖库有：{'、'.join(delivery_hits[:3])}。"
+            "注意：这些是**外卖店**，不是步行可达的堂食，别把它们说成「符合时间的堂食」。"
+            "用户能接受外卖时，用 query=外卖 重新检索一次、拿全字段再走 format_recommendation 出卡片；"
+            "用户坚持堂食就如实说这个时间范围内没有匹配，禁止声称「知识库里其实有符合条件的店」。"
+        )
+
+    # 口味只存在于另一个场景：要堂食、辣味店全在外卖库。
+    # 以前这里会放宽口味，把一家 12 公里外、评分 1 分、没有步行数据的店当推荐——
+    # 用户照着走过去 40 分钟，回来给个差评。实话比兜底有用。
+    if taste_elsewhere:
+        scene_label = "外卖" if want_delivery else "堂食"
+        other_label = "堂食" if want_delivery else "外卖"
+        other_mode = "dine_in" if want_delivery else "delivery"
+        relaxed["该口味只在另一场景"] = (
+            f"当前「{scene_label}」场景里没有符合「{taste}」的门店；"
+            f"{other_label}库里有：{_describe_places(taste_elsewhere)}。"
+            f"这些是{other_label}店，不能说成符合条件的{scene_label}。"
+            f"用户能接受{other_label}时，用 dining_mode={other_mode} 重新检索一次，"
+            "拿全字段（地址/人均/交通）再走 format_recommendation 出卡片；"
+            "用户坚持堂食就如实说这个范围内没有，不要拿无关门店凑数。"
+        )
+
+    # ---- ③ 两边都没有：如实说明 ----
+    out = {"结果": [], "用餐方式": mode or "未指定"}
+    # 放宽建议（放宽时间/放宽预算/外卖库里有）：比一句「没匹配」有用得多
+    out.update(relaxed)
+    if online_note is not None:
+        out["联网检索"] = online_note
+        out["建议"] = (
+            "先按「放宽预算/放宽时间/外卖库里有」这些字段回答用户——本地确实有相关的店，"
+            "只是被条件或场景筛掉了；联网额度恢复后再补充更远的门店"
+            if relaxed
+            else "本地知识库无匹配，联网检索暂不可用；可放宽口味/预算/时间约束稍后再试"
+        )
+    elif online_kw:
+        out["提示"] = f"本地知识库与联网检索均无「{online_kw}」匹配"
+        out["建议"] = (
+            f"附近没有「{online_kw}」这个品类。应当如实说明没找到，"
+            "并询问用户是否换菜系或放宽条件；不要用其他品类代替。"
+        )
+    elif not places:
+        out["提示"] = "本地知识库暂无真实数据（示例数据已隔离，不用于正式推荐）"
+        out["下一步"] = "必须改用 search_poi 联网检索周边真实门店，检索结果会带 uid/地址/坐标/距离，再用 verify_route 核实路线"
+    else:
+        if taste_elsewhere:
+            out["提示"] = f"当前场景（{'外卖' if want_delivery else '堂食'}）知识库里没有「{taste}」相关门店"
+            out["建议"] = (
+                "按「该口味只在另一场景」如实回答，并询问用户是否接受换个场景；"
+                "不要拿无关门店凑数，也不要声称这个条件下有符合的店"
+            )
+        elif relaxed:
+            out["提示"] = "知识库有相关门店，但都被预算/时间/场景条件筛掉了"
+            out["建议"] = "按「放宽预算/放宽时间/外卖库里有」说明差在哪，让用户自己决定是否放宽"
+        else:
+            out["提示"] = "知识库有真实数据但无匹配结果"
+            out["建议"] = "可放宽口味/预算/时间约束后重试"
+    return json.dumps(out, ensure_ascii=False)

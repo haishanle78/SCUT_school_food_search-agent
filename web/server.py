@@ -19,14 +19,17 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 项目根加入搜索路径
 
 import config
 from agent.core import FoodAdvisorAgent, _trace
+from llm.client import get_pool
 from agent.memory import ConversationMemory, UserProfile
+from llm.client import get_pool
 from tools import map_gateway
+from tools import kb_search as kb
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -46,6 +49,9 @@ BUILD_FILES = (
     "tools/route_planner.py",
     "tools/budget_nutrition.py",
     "tools/map_gateway.py",
+    "tools/kb_index.py",
+    "tools/kb_search.py",
+    "tools/weather_gateway.py",
     "web/server.py",
     "web/static/index.html",
 )
@@ -116,6 +122,47 @@ def allow_global_chat() -> tuple[bool, int]:
             return False, 0
         _global_count += 1
         return True, config.CHAT_GLOBAL_DAILY - _global_count
+
+
+# ---------- 请求去重：同一个 request_id 只真正执行一次 ----------
+# 背景：前端超时后会重试一次。没有去重时，重试 = 再跑一遍完整流程，
+# 既重复扣模型/地图额度，也可能让用户拿到两份不一致的答案。
+# 做法：前端给每个问题生成 request_id，重试复用同一个；后端命中即返回首次结果。
+_dedupe_lock = threading.Lock()
+_dedupe: dict[str, tuple[float, dict]] = {}        # key -> (完成时间, 响应体)
+_dedupe_inflight: dict[str, threading.Event] = {}  # key -> 首次请求的完成信号
+DEDUPE_TTL = 300.0  # 5 分钟内重试都算同一个请求
+
+
+def begin_dedupe(key: str) -> tuple[str, threading.Event | None, dict | None]:
+    """判断该请求该由谁处理。
+
+    返回 (状态, 等待事件, 已缓存响应)：
+      hit   —— 已有结果，直接复用，不重复执行
+      wait  —— 首次请求还在跑，等同一次的结果（避免并发双开）
+      owner —— 由本次请求执行
+    """
+    now = time.time()
+    with _dedupe_lock:
+        for stale in [k for k, (ts, _) in _dedupe.items() if now - ts > DEDUPE_TTL]:
+            _dedupe.pop(stale, None)
+        cached = _dedupe.get(key)
+        if cached and now - cached[0] <= DEDUPE_TTL:
+            return "hit", None, cached[1]
+        if key in _dedupe_inflight:
+            return "wait", _dedupe_inflight[key], None
+        _dedupe_inflight[key] = threading.Event()
+        return "owner", None, None
+
+
+def finish_dedupe(key: str, payload: dict | None) -> None:
+    """首次请求收尾：缓存结果并唤醒等待者。payload 为 None 表示执行失败，不缓存。"""
+    with _dedupe_lock:
+        if payload is not None:
+            _dedupe[key] = (time.time(), payload)
+        event = _dedupe_inflight.pop(key, None)
+    if event is not None:
+        event.set()
 
 
 def get_session(sid: str) -> Session:
@@ -190,6 +237,10 @@ class Handler(BaseHTTPRequestHandler):
                     "tool_calls_per_turn": config.MAX_TOOL_CALLS_PER_TURN,
                 },
                 "map_stats": map_gateway.snapshot(),
+                # 凭据装配摘要（全部打码）：几把 Key / 几把 AK / 有无填写警告
+                "credentials": config.describe_credentials(),
+                # 模型通道池（Key 打码）：能直接看到几把钥匙、是否在冷却
+                "llm_pool": get_pool().snapshot() if config.LLM_ENABLED else {"keys": 0},
             })
         elif path == "/api/health":
             self._send(200, {
@@ -207,6 +258,46 @@ class Handler(BaseHTTPRequestHandler):
                     for p in config.ORIGIN_PRESETS
                 ],
             })
+        elif path == "/api/kb/status":
+            # 知识库规模（门店数/评价数/是否演示数据），前端顶部展示
+            self._send(200, kb.kb_status())
+        elif path == "/api/kb/search":
+            params = parse_qs(urlparse(self.path).query)
+
+            def value(key: str, default: str = "") -> str:
+                return (params.get(key) or [default])[0]
+
+            try:
+                max_price = float(value("max_price")) if value("max_price") else None
+            except ValueError:
+                max_price = None
+            try:
+                max_walk = int(value("max_walk")) if value("max_walk") else None
+            except ValueError:
+                max_walk = None
+
+            items = kb.search_stores(
+                query=value("q"),
+                scene=value("scene"),
+                max_price=max_price,
+                max_walk=max_walk,
+                tag=value("tag"),
+                sort=value("sort", "relevance"),
+            )
+            self._send(200, {
+                "demo": kb.is_demo(),
+                "total": len(items),
+                "items": items,
+                "status": kb.kb_status(),
+            })
+        elif path == "/api/kb/store":
+            params = parse_qs(urlparse(self.path).query)
+            name = (params.get("name") or [""])[0]
+            detail = kb.store_detail(name)
+            if detail is None:
+                self._send(404, {"error": "知识库中没有这家店", "name": name})
+            else:
+                self._send(200, {"demo": kb.is_demo(), "store": detail})
         else:
             self._send(404, {"error": "not found"})
 
@@ -243,8 +334,30 @@ class Handler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 去重必须放在限流之前：重试若先被「每分钟 N 次」拦下，
+            # 用户看到的就是一个假的频率错误，而真正的原因只是他重试了一次。
+            rid = str(body.get("request_id") or "").strip()[:64]
+            dedupe_key = f"{sid}:{rid}" if rid else ""
+            if dedupe_key:
+                status, event, cached = begin_dedupe(dedupe_key)
+                if status == "hit" and cached is not None:
+                    print(f"  [去重] 命中已完成的请求 {rid[:8]}…，直接复用结果")
+                    self._send(200, cached)
+                    return
+                if status == "wait" and event is not None:
+                    print(f"  [去重] 同一请求 {rid[:8]}… 正在处理，等待其完成")
+                    event.wait(timeout=150)
+                    with _dedupe_lock:
+                        done = _dedupe.get(dedupe_key)
+                    self._send(200, done[1] if done else {
+                        "error": "这个请求还在处理中，请稍等几秒再试",
+                    })
+                    return
+
             ok_global, _left = allow_global_chat()
             if not ok_global:
+                if dedupe_key:
+                    finish_dedupe(dedupe_key, None)
                 self._send(429, {
                     "error": "今天全站提问次数已达上限，明天再来吧（额度用于保证比赛演示期间稳定）",
                 })
@@ -253,6 +366,8 @@ class Handler(BaseHTTPRequestHandler):
             sess = get_session(sid)
             allowed, wait = sess.allow_chat()
             if not allowed:
+                if dedupe_key:
+                    finish_dedupe(dedupe_key, None)
                 self._send(429, {
                     "error": f"问得有点快，{wait} 秒后再试（每分钟最多 {config.CHAT_RATE_PER_MIN} 次）",
                     "retry_after": wait,
@@ -282,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
                 summary = sess.agent.last_summary
                 dropped = sess.agent.last_dropped
                 origin_name = sess.agent.origin["name"]
-            self._send(200, {
+            payload = {
                 "reply": reply,
                 "trace": trace,
                 "cards": cards,
@@ -291,7 +406,13 @@ class Handler(BaseHTTPRequestHandler):
                 "origin": origin_name,
                 "profile": sess.profile.data,
                 "map_stats": map_gateway.snapshot(),
-            })
+                # 模型通道池（Key 打码）：能直接看到几把钥匙、是否在冷却
+                "llm_pool": get_pool().snapshot() if config.LLM_ENABLED else {"keys": 0},
+            }
+            # 先缓存再回包：重试请求此刻到达也能立刻拿到同一份结果
+            if dedupe_key:
+                finish_dedupe(dedupe_key, payload)
+            self._send(200, payload)
             return
 
         if path == "/api/reset":
@@ -316,10 +437,20 @@ class Server(ThreadingHTTPServer):
 def main() -> None:
     port = int(os.getenv("PORT", "8787"))
     mode = "LLM 模式" if config.LLM_ENABLED else "离线模式"
+    cred = config.describe_credentials()
     print("=" * 56)
     print("  国际校区干饭军师 · 网页版已启动")
     print(f"  模式：{mode} | 百度地图：{'已连接' if config.MAP_ENABLED else '未配置'}")
     print(f"  端口：{port} | build：{BUILD['hash']} | 配置源：{config.CONFIG_SOURCE}")
+    # 凭据装配摘要：几把 Key、几把 AK，一眼核对（全部打码，不含明文）
+    print(f"  模型 Key：{cred['llm']['keys']} 把 {cred['llm']['masked']}"
+          f" | 并发 {cred['llm']['concurrency_total']} 路")
+    print(f"  地图 AK：{cred['map']['aks']} 把 {cred['map']['masked']}"
+          f" | 日额度 检索 {cred['map']['daily_search_total']} / 路线 {cred['map']['daily_route_total']}")
+    for warn in cred["warnings"]:
+        print(f"  [配置警告] 疑似多行填写被丢弃 → {warn}")
+    if cred["warnings"]:
+        print("             多把凭据必须用逗号写在同一行，不能换行分隔")
     print(f"  限制：{config.MAX_MESSAGE_CHARS} 字 / 每分钟 {config.CHAT_RATE_PER_MIN} 次 / 日 {config.CHAT_GLOBAL_DAILY} 次")
     print("  关闭服务：Ctrl+C")
     print("=" * 56)

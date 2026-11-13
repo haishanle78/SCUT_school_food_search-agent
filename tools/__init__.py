@@ -20,6 +20,7 @@ from agent.memory import UserProfile
 from tools.food_search import food_search
 from tools.route_planner import find_restaurant, plan_route, search_poi, verify_route
 from tools.budget_nutrition import estimate_budget, health_hint
+from tools.weather_gateway import get_weather
 
 Registry = Dict[str, Callable[..., str]]
 
@@ -86,13 +87,23 @@ def build_registry(
 ) -> Tuple[Registry, List[Dict[str, Any]]]:
     store = poi_store if poi_store is not None else {}
     functions: Registry = {
-        "food_search": _adapt(food_search),
+        "food_search": _adapt(
+            lambda query="", taste="", dining_mode="", budget_max=None, max_minutes=None: food_search(
+                query,
+                taste=taste,
+                dining_mode=dining_mode,
+                budget_max=budget_max,
+                max_minutes=max_minutes,
+                poi_store=store,
+            )
+        ),
         "plan_route": _adapt(plan_route),
         "find_restaurant": _adapt(lambda name: find_restaurant(name, poi_store=store)),
         "search_poi": _adapt(lambda keyword: search_poi(keyword, poi_store=store)),
         "verify_route": _adapt(lambda uid, mode="walking": verify_route(uid, poi_store=store, mode=mode)),
         "estimate_budget": _adapt(estimate_budget),
         "health_hint": _adapt(health_hint),
+        "get_weather": _adapt(get_weather),
         "remember_preference": _adapt(lambda key, value: remember_preference(key, value, profile)),
         "format_recommendation": _adapt(format_recommendation),
     }
@@ -103,19 +114,55 @@ def build_registry(
             "function": {
                 "name": "food_search",
                 "description": (
-                    "本地真实知识库检索（问卷/点评人工整理，含学生评分与招牌菜）。"
-                    "用户问『附近吃什么 / 推荐餐厅』时先查本地库；知识库为空会明确提示，"
-                    "此时改用 search_poi 联网检索，禁止编造门店。"
+                    "美食检索（先本地、后联网）：优先查本地知识库（问卷/点评人工整理，"
+                    "含学生评分/招牌菜/避雷）；本地无匹配时【自动】联网检索百度地图 "
+                    "3 公里内真实门店（带 uid/地址/坐标，自动剔除停车场等附属设施）。"
+                    "用户问『附近吃什么/推荐餐厅/想吃X』时用这个工具即可，"
+                    "它已经内置联网兜底——【不需要】再单独调 search_poi，"
+                    "除非返回明确提示联网失败或需要换品类词重查。禁止编造门店。"
+                    "\n三个参数各管一件事，不要混用："
+                    "query 只放菜系/品类（汉堡、日料、粥、粤菜），"
+                    "taste 只放口味（辣、清淡、甜），"
+                    "dining_mode 只放用餐方式（外卖=delivery，到店=dine_in）。"
+                    "把『外卖』塞进 taste、或把『辣』塞进 query 都会导致检索方向错误。"
+                    "用户问某一家具体店（『达海美食怎么样』『小意司日料多少钱』）时也用这个工具，"
+                    "query 直接传店名，会按店名精确命中并返回该店真实评分/招牌菜/一句话点评/下单方式；"
+                    "回答只能用返回字段，没写的一律说『资料里没提到』，禁止编造菜品和环境。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "关键词：店名/菜系/菜品/场景（如'辣'、'聚餐'、'外卖'、'粉面'）"},
-                        "taste": {"type": "string", "description": "口味偏好，如：辣、清淡、甜"},
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "菜系/品类关键词：汉堡、日料、寿司、粥、粉面、粤菜、烧腊、川菜。"
+                                "只放『吃什么品类』，不要放口味词（辣/清淡）和场景词（外卖/聚餐）。"
+                                "不知道品类就留空，不要填『外卖』。"
+                            ),
+                        },
+                        "taste": {
+                            "type": "string",
+                            "description": (
+                                "口味偏好，只能填：辣、清淡、甜、重口、鲜。"
+                                "『外卖』不是口味，请放 dining_mode。"
+                            ),
+                        },
+                        "dining_mode": {
+                            "type": "string",
+                            "enum": ["delivery", "dine_in"],
+                            "description": (
+                                "本次用餐方式。用户说『外卖/送到宿舍/不想出门/点个XX』→ delivery；"
+                                "说『去店里/堂食/走过去』或没提→ dine_in。"
+                                "delivery 时不核实步行路线，配送能力/费用/时长无依据时标待确认。"
+                            ),
+                        },
                         "budget_max": {"type": "number", "description": "人均预算上限（元）"},
-                        "max_minutes": {"type": "integer", "description": "可接受的步行时间上限（分钟）"},
+                        "max_minutes": {
+                            "type": "integer",
+                            "description": "可接受的步行时间上限（分钟）；外卖场景下该参数无意义，不要传",
+                        },
                     },
-                    "required": ["query"],
+                    "required": [],
                 },
             },
         },
@@ -235,6 +282,22 @@ def build_registry(
         {
             "type": "function",
             "function": {
+                "name": "get_weather",
+                "description": (
+                    "查询当前实时天气（校区所在番禺区，含气温/现象/今日预报/出行建议）。"
+                    "用户主动问天气（『下雨了吗』『现在天气怎么样』『明天适合出门吃饭吗』）时调用；"
+                    "天气会自动注入系统提示，普通推荐任务无需调用本工具。"
+                    "服务不可用或异常时如实说明『暂时查不了天气』，不影响推荐本身，禁止编造天气。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "remember_preference",
                 "description": "把用户的口味偏好、忌口、常去/不想再去的店、预算习惯记入长期画像，之后的对话都要遵守。",
                 "parameters": {
@@ -253,9 +316,10 @@ def build_registry(
                 "name": "format_recommendation",
                 "description": (
                     "推荐卡片生成器：确定最终推荐后、输出最终回答之前调用。"
-                    "每家店必须传 uid（来自 search_poi 或 find_restaurant）并已用 verify_route 核实过路线；"
-                    "名称、地址、坐标、耗时、距离、路线链接由后端注入，你只填解释性字段和预估人均。"
-                    "后端会做硬校验：非餐饮门店、未核实路线、超出范围的条目会被剔除，"
+                    "每家店必须传 uid（来自 search_poi / find_restaurant 或 food_search 知识库结果）；"
+                    "堂食门店要先用 verify_route 核实路线，外卖店（类别=外卖）有坐标即可，不需要 verify_route。"
+                    "名称、地址、坐标、耗时、距离、路线/地图链接由后端注入，你只填解释性字段和预估人均。"
+                    "后端会做硬校验：非餐饮门店、未核实路线的堂食店、超出范围的条目会被剔除，"
                     "人均/评分/营业时间没有来源时前端显示『待确认』——不要编造。"
                     "没有合适的店就别调用本工具，直接如实告诉用户没有匹配。"
                 ),
