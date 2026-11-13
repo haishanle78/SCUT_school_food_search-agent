@@ -154,8 +154,10 @@ def test_burger_delivery_params() -> None:
 
 def test_cuisine_not_silently_relaxed() -> None:
     print("[3] 用户要的品类没有时：不得自动换成品类凑数")
-    original = fs._online_fallback
+    original_online = fs._online_fallback
+    original_all = fs._all_places
     fs._online_fallback = lambda kw, store: ([], None)  # 联网也查不到
+    fs._all_places = lambda: []                          # 本地库清空，确保「真的没有」
     try:
         data = json.loads(fs.food_search(query="美式汉堡", dining_mode="delivery"))
         check("没有硬凑出结果", not (data.get("结果") or []), str(data.get("结果")))
@@ -163,7 +165,8 @@ def test_cuisine_not_silently_relaxed() -> None:
         check("明确要求如实说没找到", "没找到" in advice, advice[:80])
         check("明确禁止用别的品类代替", "不要用其他品类代替" in advice, advice[:80])
     finally:
-        fs._online_fallback = original
+        fs._online_fallback = original_online
+        fs._all_places = original_all
 
 
 # ---------------- 4. 无坐标私域外卖 ----------------
@@ -463,6 +466,8 @@ def test_find_restaurant_confidence() -> None:
     print("[15] 店名『很像但字面不同』：应提示疑似+请确认，而不是让模型说没找到")
     import tools.route_planner as rp
 
+    original_kb = rp._kb_lookup
+    rp._kb_lookup = lambda name: None  # 强制走地图路径（「达海美食」现在已在本地库里）
     original = rp.gw._do_http
 
     def fake_http(path, params, ak=None):
@@ -482,6 +487,7 @@ def test_find_restaurant_confidence() -> None:
         check("不再暗示『已确认身份』", "已确认这家店的身份" not in hint, hint[:100])
     finally:
         rp.gw._do_http = original
+        rp._kb_lookup = original_kb
 
 
 # ---------------- 16. 输入提示兜底：search 搜不到的店 ----------------
@@ -513,6 +519,11 @@ def test_suggestion_fallback_finds_missing_shop() -> None:
         return rp.gw.MapResult(rp.gw.OK, payload={"status": 0, "results": [wrong]})
 
     original = rp.gw._do_http
+    original_kb = rp._kb_lookup
+    # 「达海煲仔饭」现在是本地「达海美食」的别名，会直接 kb_hit。
+    # 这里要测的是「本地没有 + 地图 search 也搜不到」时 suggestion 能不能兜住，
+    # 所以把知识库查空。
+    rp._kb_lookup = lambda name: None
     rp.gw._do_http = fake_http
     try:
         data = json.loads(rp.find_restaurant("达海煲仔饭", poi_store={}))
@@ -523,6 +534,17 @@ def test_suggestion_fallback_finds_missing_shop() -> None:
         check("不再拿无关候选当答案", data.get("名称") != "超级烤肉木桶饭(新造店)")
     finally:
         rp.gw._do_http = original
+        rp._kb_lookup = original_kb
+
+
+def test_alias_hits_same_store() -> None:
+    print("[16b] 同址异名：一块招牌两个业务，别名应直接命中同一家")
+    import tools.route_planner as rp
+
+    for name in ("达海美食", "达海煲仔饭", "达海煲仔饭(南村店)", "达海煲仔饭（南村店）"):
+        data = json.loads(rp.find_restaurant(name, poi_store={}))
+        check(f"「{name}」命中知识库", data.get("状态") == "kb_hit", str(data.get("状态")))
+        check(f"「{name}」返回带坐标", bool(data.get("坐标")), str(data.get("坐标")))
 
 
 def test_kb_missing_coord_filled_by_suggestion() -> None:
@@ -629,6 +651,7 @@ if __name__ == "__main__":
     test_strip_tool_echo()
     test_find_restaurant_confidence()
     test_suggestion_fallback_finds_missing_shop()
+    test_alias_hits_same_store()
     test_kb_missing_coord_filled_by_suggestion()
     test_coord_fill_prefers_nearest()
     print(f"\n通过 {PASSED} 项" + ("" if not FAILED else f"，失败 {len(FAILED)} 项：{FAILED}"))

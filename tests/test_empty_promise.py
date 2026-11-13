@@ -256,6 +256,37 @@ def test_no_tools_not_triggered_for_short_reply() -> None:
         "根据你的口味，我推荐这几部电影，都很适合周末看，节奏舒缓、画面漂亮。", 0, "推荐个剧") == "")
 
 
+def test_refuse_without_lookup() -> None:
+    print("[12] 问具体门店却直接拒答 → 强制先查知识库，反复不听则规则兜底")
+    refusal = (
+        "抱歉，我无法提供关于“达海美食”的具体信息，因为我没有访问实时数据库或外部网站的能力。"
+        "建议您查看最新的评论、评分或使用地图服务来获取相关信息。"
+    )
+    agent = make_agent([refusal, refusal, refusal])
+    reply = agent._react_loop("达海美食怎么样")
+
+    nudged = any(
+        isinstance(m.get("content"), str) and "一次工具都没调" in m["content"] and "知识库" in m["content"]
+        for payload in agent.llm.payloads for m in payload
+    )
+    check("refuse 纠正消息已注入", nudged)
+    check("模型被要求重新执行", agent.llm.i >= 2, str(agent.llm.i))
+    check("没把「无法提供」当成答案", "无法提供" not in reply, reply[:80])
+
+
+def test_refuse_no_false_positive() -> None:
+    print("[13] 已查过 / 非餐饮问题 → refuse 不误伤")
+    agent = make_agent(["x"])
+    refusal = "抱歉，我没有找到这家店的信息。"
+    check("调过工具后不干预", agent._nudge_reason(refusal, 2, "达海美食怎么样") == "")
+    check("非餐饮问题不干预", agent._nudge_reason("抱歉，我无法提供这类信息。", 0, "今天天气怎么样") == "")
+    check("非门店咨询的推荐不误判", agent._nudge_reason("想吃点什么口味的呢？", 0, "帮我推荐点吃的") == "")
+    check(
+        "门店咨询没查库就作答（哪怕答得像样）也要先查",
+        agent._nudge_reason("达海美食人均 15 元，评分 4.5。", 0, "达海美食怎么样") == "refuse",
+    )
+
+
 if __name__ == "__main__":
     config.KB_DEMO = False
     test_promise_detection()
@@ -269,5 +300,7 @@ if __name__ == "__main__":
     test_card_nudge_no_false_positive()
     test_no_tools_recommendation()
     test_no_tools_not_triggered_for_short_reply()
+    test_refuse_without_lookup()
+    test_refuse_no_false_positive()
     print(f"\n通过 {PASSED} 项" + ("" if not FAILED else f"，失败 {len(FAILED)} 项：{FAILED}"))
     raise SystemExit(0 if not FAILED else 1)

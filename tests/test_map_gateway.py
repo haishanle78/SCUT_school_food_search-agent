@@ -24,6 +24,9 @@ config.MAP_ENABLED = True
 # 断言「只调用 1 次」就会假失败。多 AK 负载均衡另有 test_concurrency 覆盖。
 config.BAIDU_MAP_AKS = ["test-ak"]
 config.BAIDU_MAP_AK = "test-ak"
+# 全程 mock 网络，不该受当天真实额度用尽的影响（否则跑一天演示后测试就挂了）
+config.MAP_DAILY_SEARCH = 10**6
+config.MAP_DAILY_ROUTE = 10**6
 # 天气模块走真实网络，单测一律关闭（本文件只测地图治理）
 config.WEATHER_ENABLED = False
 
@@ -113,6 +116,8 @@ def make_agent() -> FoodAdvisorAgent:
 # ---------- 验收1/2：指定店名不擅自替换 ----------
 
 def test_specified_store_not_substituted():
+    # 用不在本地知识库的店名，专测联网路径的附属设施防线
+    # （B记鱼粥现已本地命中 kb_hit 短路联网，不再适合当联网用例）
     def handler(path, params):
         query = params.get("query", "")
         if "停车场" in query or "甲记" in query:
@@ -144,6 +149,12 @@ def test_specified_store_not_substituted():
     assert "不确定" in data2.get("提示", "") or "不能确认" in data2.get("提示", "")
     assert "甲记鱼粥" in json.dumps(data2, ensure_ascii=False)
     ok("验收1 指定店名查不到时：不替换成恒源客家佬粥粉面，候选人需用户确认")
+
+    # 本地库已有核实坐标的店（B记鱼粥）应直接 kb_hit，短路联网
+    data3 = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+    assert data3["状态"] == "kb_hit", f"本地已核实的店应 kb_hit: {data3}"
+    assert data3.get("坐标"), "kb_hit 应带坐标"
+    ok("验收1/3 本地库已核实门店：kb_hit 短路联网")
 
 
 # ---------- 验收3：限流/配额要如实说明，不能说门店不存在 ----------
@@ -321,7 +332,21 @@ def test_global_rate_limit():
 # ---------- 验收1c：知识库有资料但无坐标 ----------
 
 def test_kb_no_coord() -> None:
-    data = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+    # 不能拿真实库里的店来测：B记鱼粥 现在已经补到坐标了，会走 kb_hit。
+    # 用 mock 造一条「有资料、无坐标、且地图也补不到坐标」的记录，测的是分支逻辑本身。
+    original_kb = rp._kb_lookup
+    original_fill = rp._coord_from_suggestion
+    rp._kb_lookup = lambda name: {
+        "名称": "无坐标测试店", "正式名称": "无坐标测试店", "类别": "周边堂食",
+        "坐标": "", "地址": "", "人均": 37, "交通": {"步行": 20},
+        "一句话点评": "测试用", "测评来源": "攻略整理",
+    }
+    rp._coord_from_suggestion = lambda name: None  # 模拟输入提示也补不到
+    try:
+        data = json.loads(rp.find_restaurant("无坐标测试店", poi_store={}))
+    finally:
+        rp._kb_lookup = original_kb
+        rp._coord_from_suggestion = original_fill
     assert data["状态"] == "kb_no_coord", f"应识别为『有资料无坐标』: {data}"
     assert data.get("坐标") is None and data.get("地址") == "待确认"
     assert "导航" in data["提示"] or "位置待确认" in data["要求"]

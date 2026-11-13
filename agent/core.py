@@ -48,6 +48,18 @@ WEATHER_UNAVAILABLE_HINT = (
     "与天气无关的推荐照常进行，不要因此降低回答质量。\n\n"
 )
 
+# 约束的「当轮有效性」判定：预算/时间只在用户本轮原话里出现过才算数。
+# 多轮对话里模型会把上一轮的「30 以内、15 分钟内」原样带到新问题，
+# 用户只是换了品类（「想吃肠粉」），结果被旧约束掐成 0 家。
+_BUDGET_HINT_RE = re.compile(
+    r"\d{1,4}\s*(?:元|块钱|块|以内|以下|左右|内)"      # 30元 / 30以内 / 30左右
+    r"|(?:预算|人均|不超过|最多|上限)\s*\d{1,4}"        # 预算30 / 人均30
+)
+_TIME_HINT_RE = re.compile(
+    r"\d{1,3}\s*(?:分钟|min)"                          # 15分钟
+    r"|(?:步行|走过去|走|骑行|骑车|打车|坐车)\D{0,6}\d{1,3}"  # 步行15
+)
+
 
 def _trace(text: str) -> None:
     """推理过程可视化：答辩时评委能看到每一步在干什么。"""
@@ -233,6 +245,7 @@ class FoodAdvisorAgent:
     _nearby_strict: bool = False
     # 本轮诊断信息（只用于日志定位，不含任何密钥；对外不下发）
     _turn_log: Dict[str, Any] = {}
+    _turn_user_input: str = ""        # 本轮用户原话（约束只认它，不认历史）
 
     def set_origin(self, origin_key: str) -> None:
         """切换出发点：路线事实按起点分别记录，切换后旧路线自动作废。"""
@@ -257,6 +270,9 @@ class FoodAdvisorAgent:
         self._used_food_search = False
         self._dining_mode = ""
         self._turn_log = {}
+        # 本轮用户原话：预算/时间约束只认它，不认聊天历史（防止上一轮的
+        # 「30 元以内、15 分钟内」把这一轮的新问题掐死）
+        self._turn_user_input = user_input or ""
         # 「附近/周边/走过去」这类明确的空间约束 → 超过 3 公里的店不推荐；
         # 只说「想吃日料」没说附近 → 附近没有时可以给远处同类店，但要标注距离
         self._nearby_strict = any(
@@ -948,6 +964,15 @@ class FoodAdvisorAgent:
     _REC_RE = re.compile(r"推荐|哪家|有什么|附近|求|想吃|去哪")
     _FOOD_RE = re.compile(r"吃|外卖|饭|餐|食堂|窗口|菜|夜宵|下午茶|粉|面|粥")
 
+    # 用户在问某家具体门店（含只问名字不带走法的情况）
+    _STORE_ASK_RE = re.compile(
+        r"(怎么样|好不好吃|好吃吗|好吃不|如何|介绍|评价|口碑|在哪|怎么走|怎么去|几点|人均|多少钱|值得|靠谱|推荐吗)"
+    )
+    # 餐饮语境词：把「今天天气怎么样」这类提问挡在门店咨询之外
+    _FOOD_CTX_RE = re.compile(
+        r"(吃|餐|美食|菜|饭|粉|面|粥|饺|茶|咖|烧烤|火锅|店|馆|窗口|食堂|外卖|小吃|甜品|食|料)"
+    )
+
     def _is_empty_promise(self, content: str, used_tools: int) -> bool:
         """判断这条回复是不是「只说要查、实际没查」的空话。"""
         if used_tools or self.last_cards:
@@ -960,11 +985,14 @@ class FoodAdvisorAgent:
     def _nudge_reason(self, content: str, used_tools: int, user_input: str) -> str:
         """判断是否需要逼模型干活，返回原因（空串表示不需要）。
 
-        三类小模型常见"不干活"：
+        四类小模型常见"不干活"：
           promise  —— 只回「请稍等/马上查」，实际没调工具；
           clarify  —— 用户已经给了口味/预算/步行时间，它却反问「你想吃什么口味」；
           no_tools —— 一轮工具都没调，却直接写出一整段推荐（店名全是记忆里的品牌，
-                      不是知识库或地图返回的事实）。这类回答最长最像样，也最危险。
+                      不是知识库或地图返回的事实）。这类回答最长最像样，也最危险；
+          refuse   —— 用户在问某家具体门店（怎么样/在哪/人均多少），它一次工具都没调，
+                      要么回「我没有这家店的数据」，要么凭记忆编菜品和环境。
+                      本校区自有语料模型不可能凭记忆知道，必须先查。
         """
         if used_tools or self.last_cards:
             return ""
@@ -979,6 +1007,11 @@ class FoodAdvisorAgent:
         # 成段的推荐却没有一次检索：正文里的店名不可能有出处
         if len(text) >= 40 and self._REC_RE.search(user_input) and self._FOOD_RE.search(user_input):
             return "no_tools"
+        # 问具体门店却一次没查：要么直接拒答（「我没有这家店的数据」），
+        # 要么凭记忆编营业特色（「寿司刺身定食都有」）——后者往往更长更像样，
+        # 所以这里不设长度上限，只靠「门店咨询 + 餐饮语境」把关。
+        if self._STORE_ASK_RE.search(user_input) and self._FOOD_CTX_RE.search(user_input):
+            return "refuse"
         return ""
 
     _NUDGE_TEXT = {
@@ -995,8 +1028,21 @@ class FoodAdvisorAgent:
         "no_tools": (
             "（系统提醒：这一轮你还没有调用任何工具，就写出了一整段推荐——里面的店名全部来自你的记忆，"
             "而本项目只允许推荐知识库或地图返回的门店，那些品牌在本校区附近有没有、开不开、送不送外卖都无法确认。"
-            "现在立刻调用 food_search 检索（外卖场景 query 用「外卖」），拿到真实门店后再推荐；"
+            # 注意：外卖不能用 query=「外卖」表达——那是场景不是品类。
+            # 正确做法是 dining_mode=delivery，query 只写想吃的品类（汉堡/日料/粥）。
+            "现在立刻调用 food_search 检索（外卖场景传 dining_mode=delivery，"
+            "query 只写品类，例如「汉堡」；不要写「外卖」），拿到真实门店后再推荐；"
             "检索不到就如实说没有匹配。）"
+        ),
+        "refuse": (
+            "（系统提醒：用户在问某家具体门店，但这一轮你一次工具都没调——"
+            "无论是回答「我没有这家店的数据」，还是直接用记忆里的印象描述菜品和环境，都不允许。"
+            "本校区自有知识库里有真实评分和评价语料，你凭记忆写的东西用户一查就会发现对不上。"
+            "现在立刻：① 用店名调 food_search（query 传店名本身，例如「达海美食」），"
+            "拿到真实评分、口味标签和一句话点评；② 需要地址或路线再调 find_restaurant(店名)。"
+            "回答只能使用工具返回的字段：库里没有写的菜名、环境、营业时间一律不要编，"
+            "可以说「资料里没提到」。只有工具明确返回「无匹配」时，才可以如实说查不到，"
+            "并且要说明是查过之后没查到。）"
         ),
     }
 
@@ -1021,11 +1067,46 @@ class FoodAdvisorAgent:
             for poi in self.poi_store.values()
         )
 
+    def _sanitize_food_args(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """只保留「本轮用户原话里确实出现过」的预算/时间/口味约束。
+
+        真实翻车场景：用户先说「想吃辣的，预算30以内，不想走超过15分钟」，
+        下一句只说「想吃肠粉」。模型把上一轮的 30 元 / 15 分钟原样塞进
+        food_search，结果本地唯一有肠粉的达海美食（步行 28 分钟）被筛掉，
+        接口返回 0 家 → 用户看到「查不到肠粉」。
+
+        所以这里按本轮原话做硬净化：没说过的一律清空。
+        只清洗这三个筛选参数，query / taste 的口味语义仍交给 food_search 处理。
+        """
+        text = self._turn_user_input or ""
+        clean = dict(args or {})
+
+        if "budget_max" in clean and not _BUDGET_HINT_RE.search(text):
+            clean.pop("budget_max", None)
+        if "max_minutes" in clean and not _TIME_HINT_RE.search(text):
+            clean.pop("max_minutes", None)
+
+        taste = str(clean.get("taste") or "").strip()
+        query = str(clean.get("query") or "").strip()
+        if taste:
+            from tools.food_search import _is_taste_word, _taste_terms
+
+            # ① 不是口味词（「肠粉」「粥」是品类词，塞进 taste 会把口味过滤搞歪）
+            # ② 或本轮根本没提这个口味（上一轮的「辣」不该管这一轮）
+            keep = _is_taste_word(taste) and any(
+                term and term in text for term in _taste_terms(taste)
+            )
+            if not keep or (query and taste in query):
+                clean.pop("taste", None)
+        return clean
+
     def _execute_tool(self, tc: ToolCall) -> str:
         self._trace_fn(f"调用工具 {tc.name}({tc.arguments})")
         func = self.functions.get(tc.name)
         if func is None:
-            return json.dumps({"error": f"未知工具: {tc.name}，可用: {list(self.functions)}"}, ensure_ascii=False)        # food_search 传了 dining_mode 就记下来：卡片校验要用它判断「这顿怎么吃」，
+            return json.dumps({"error": f"未知工具: {tc.name}，可用: {list(self.functions)}"}, ensure_ascii=False)
+
+        # food_search 传了 dining_mode 就记下来：卡片校验要用它判断「这顿怎么吃」，
         # 而不是去猜门店类别（地图结果的类别永远是「联网检索」，猜不出外卖场景）。
         if tc.name == "food_search":
             _args = tc.parse_arguments()
@@ -1066,8 +1147,12 @@ class FoodAdvisorAgent:
                     },
                     ensure_ascii=False,
                 )
+        args = tc.parse_arguments()
+        if tc.name == "food_search":
+            # 约束只对本轮原话负责：模型会把上一轮的预算/时间/口味原样带进来
+            args = self._sanitize_food_args(args)
         try:
-            output = func(**tc.parse_arguments())
+            output = func(**args)
         except TypeError as exc:
             return json.dumps({"error": f"参数不匹配: {exc}，请检查参数名"}, ensure_ascii=False)
         except Exception as exc:
@@ -1126,7 +1211,26 @@ class FoodAdvisorAgent:
         data = json.loads(result)
         if not data.get("结果"):
             from tools.food_search import _all_places
+
             total = len(_all_places())
+            # 本地没有「完全符合」的店时，最有用的话是「放宽哪个条件能吃上哪家」，
+            # 而不是一句「暂无真实数据」把用户打发走。
+            # 场景：用户问「想吃辣的，30 以内，15 分钟内」，本地一家都不满足，
+            # 但放开时间就有店——这句话必须说出来。
+            tips: List[str] = []
+            for key in ("放宽时间", "放宽预算", "外卖库里有"):
+                value = data.get(key)
+                if isinstance(value, list) and value:
+                    tips.append(f"{key}：" + "；".join(str(v) for v in value[:3]))
+                elif isinstance(value, str) and value.strip():
+                    tips.append(value)
+            if tips:
+                scope = f"本地知识库共 {total} 家" if total else "本地知识库"
+                return (
+                    f"{label.replace('Top3', '放宽建议')}\n"
+                    f"严格符合你全部条件的店没有（{scope}），但放宽一项就能吃上：\n"
+                    + "\n".join(f"- {tip}" for tip in tips)
+                )
             if total:
                 return (
                     f"（按你给的条件，本地知识库（共 {total} 家）里没有匹配的门店。"
@@ -1288,6 +1392,23 @@ class FoodAdvisorAgent:
             "- 工具返回『限流 / 配额用尽 / 权限异常 / 超时』是接口故障，不是附近没有店："
             "如实告诉用户『暂时查不了，稍后再试』，禁止改搜别的品类，禁止编造门店和耗时。\n"
             "- 只有工具明确说『查询成功但没有匹配』时，才能说附近没有合适的店。\n\n"
+            "【筛选条件只在当轮有效】\n"
+            "- 预算、步行/配送时间上限、口味偏好，只有用户**这一轮亲口说出来**才传参数；"
+            "上一轮说过的「30 以内、15 分钟内、想吃辣」不能自动带到新问题里。\n"
+            "- 用户只是换了品类或换了店名（上轮『想吃辣的，30 以内，15 分钟内』，这轮只说『想吃肠粉』）时，"
+            "budget_max / max_minutes 一律留空，taste 也只在用户这轮提到口味时才传。"
+            "把旧条件带进新问题，会把本来能吃的店筛掉，用户看到的就是「查不到」。\n"
+            "- taste 只放口味词（辣/清淡/甜/重口…）；品类词（肠粉、粥、烧烤、面）属于 query，不要塞进 taste。\n"
+            "- 只有用户明确说「还是要 15 分钟内的」「预算照旧」这类延续表达时，才继承上一轮的条件。\n"
+            "- 回答正文里也不要复述上一轮的数字（别写「虽然超出你说的 15 分钟」）："
+            "用户这轮没提，就当没有这个限制，只按本轮条件判断值不值得去。\n\n"
+            "【工具返回「放宽建议」时怎么说】\n"
+            "- 字段「放宽时间 / 放宽预算」= 本地确实有这家店，只是超出了用户设的上限。"
+            "只能作为「放宽条件后可以去」的替代方案，必须带上工具给的耗时/人均，不能说成符合条件。\n"
+            "- 字段「外卖库里有」= 这些是外卖店，不是步行可达的堂食。用户能接受外卖，"
+            "就用 query=外卖 重新检索一次、拿全字段再出卡片；用户坚持堂食，就如实说这个范围没有匹配。\n"
+            "- **禁止说「知识库里其实有符合条件的店，只是没查到」**：查不到就是没有，"
+            "编一个「其实有」比直接说没有更糟糕。\n\n"
             "【诚实铁律】\n"
             "- **任何具体门店名都必须来自本轮工具返回**：未调用 food_search / find_restaurant / search_poi "
             "检索之前，禁止在回答里列出任何店名（包括你记忆里的常见品牌）；检索结果里没有的店，一个字都不要提。\n"
@@ -1323,7 +1444,9 @@ class FoodAdvisorAgent:
             "**外卖店的正文、reason、warning 里只写口味、价格和配送，禁止写「步行几分钟/距离几公里」**——"
             "外卖不是走过去的，后端也从未为外卖店算过步行路线，写了就是编造；"
             "要提醒远近就说「距校区约 X 公里，配送可能偏慢」。"
-            "私域商家可能没有坐标，此时位置写「待确认」，不要编造地址或坐标。\n\n"
+            "私域商家可能没有坐标，此时位置写「待确认」，不要编造地址或坐标。\n"
+            "**正文里不要自己生成任何地图链接**（包括 Google 地图、百度地图的 URL）——"
+            "卡片底部已有后端生成的官方导航/位置链接，你写的链接坐标是编的，而且在国内打不开。\n\n"
             f"【当前出发点】{self.origin['name']}（坐标来自地图实测，检索与路线均以此为起点）\n"
             "默认就用这个出发点，**不要反问用户在哪个位置**；用户主动说『从南门/北门走』时，"
             "提示他可以在页面顶部切换出发点。系统没有手机实时定位，不要声称知道用户的当前位置。\n"

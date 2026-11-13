@@ -167,8 +167,9 @@ def test_exception_safe() -> None:
 
 def test_delivery_scene_isolation() -> None:
     print("[6] 场景互斥：堂食检索不混入外卖店")
-    # 用知识库确定存在的品类，避免依赖联网可用性（干净环境无 AK 时也能稳定断言）
-    dine_in = run("粥")
+    # 用本地库里确实有货的品类（「面」3 家），且放宽步行时间——
+    # 否则测的是「数据里没有 15 分钟内的店」而不是「场景互斥」
+    dine_in = run("面", max_minutes=40)
     cats = {i.get("类别") for i in dine_in.get("结果", [])}
     check("堂食检索结果里没有外卖条目", "外卖" not in cats, str(cats))
     check("堂食检索仍有结果", bool(dine_in.get("结果")), str(dine_in)[:100])
@@ -210,8 +211,29 @@ def main() -> None:
     test_scene_word_no_online()
     test_exception_safe()
     test_delivery_scene_isolation()
+    test_store_name_query()
     print(f"\n通过 {PASSED} 项" + ("" if not FAILED else f"，失败 {len(FAILED)} 项：{FAILED}"))
     raise SystemExit(0 if not FAILED else 1)
+
+
+def test_store_name_query() -> None:
+    print("[7] 问某家店（含疑问尾巴）→ 按店名命中，且不因场景互斥漏掉外卖店")
+    calls: list[str] = []
+    original = rp.search_poi
+    rp.search_poi = _with_mock({"状态": "ok", "结果": []}, calls)
+    try:
+        data = run("达海美食怎么样")
+        names = [i["名称"] for i in data.get("结果") or []]
+        check("整句问句能命中该店", names[:1] == ["达海美食"], str(names))
+        check("带回按店名命中说明", "按店名命中" in str(data.get("匹配方式", "")), str(data)[:80])
+
+        data2 = run("小意司日料多少钱")
+        names2 = [i["名称"] for i in data2.get("结果") or []]
+        check("外卖店按店名也能命中（不被场景互斥排掉）", names2[:1] == ["小意司日料"], str(names2))
+        check("店名查询不联网", calls == [], str(calls))
+        check("外卖店带下单方式", bool((data2.get("结果") or [{}])[0].get("下单方式")))
+    finally:
+        rp.search_poi = original
 
 
 if __name__ == "__main__":
