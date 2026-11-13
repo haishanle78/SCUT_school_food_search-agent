@@ -893,8 +893,8 @@ function applyPanel(which, hidden) {
   const btn = isFilter ? filterToggle : chipsToggle;
   if (!box || !btn) return;
   box.classList.toggle("collapsed", hidden);
-  // 收起时按钮高亮，表示「这里有内容，点一下能打开」
-  btn.classList.toggle("on", hidden);
+  // 常规语义：面板展开 = 按钮按下（高亮），面板收起 = 按钮未按下（普通）
+  btn.classList.toggle("on", !hidden);
   localStorage.setItem("hide_" + which, hidden ? "1" : "0");
 }
 
