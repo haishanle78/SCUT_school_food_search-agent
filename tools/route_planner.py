@@ -156,6 +156,62 @@ def _poi_query(keyword: str, radius: Optional[int] = RADIUS_M) -> List[Dict[str,
     return (result.payload.get("results") or [])
 
 
+def _suggestion_query(keyword: str) -> List[Dict[str, Any]]:
+    """地点输入提示：按店名做模糊匹配，用来补 place/v2/search 的索引缺口。
+
+    为什么必须有这条路：place/v2/search 收录不全，很多真实小店在那里搜不到。
+    实测（2026-11-13，两家用户点名的店都是这个问题）：
+      「达海煲仔饭」search 3 公里只返回「超级烤肉木桶饭」（完全无关），
+      「B记鱼粥」search 只返回「B记鱼粥-门前停车场」（附属设施，会被过滤），
+      但同一组关键词走 suggestion 就能精确命中本体，而且同样返回 uid 和坐标，
+      可以直接接 verify_route。
+    """
+    result = gw.request(
+        "/place/v2/suggestion",
+        {"query": keyword, "region": "广州", "city_limit": "true", "output": "json"},
+        kind="search",
+        cache_key=f"sug|{keyword}",
+        ttl=config.MAP_CACHE_TTL_SEARCH,
+    )
+    _TLS.search_status = result.status
+    _TLS.search_message = result.message
+    if not result.ok:
+        return []
+    return (result.payload.get("result") or [])
+
+
+def _normalize_suggestion(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """把输入提示结果转成与 _normalize_poi 同构的门店事实。
+
+    字段差异：suggestion 用 district 而不是 area，tag/classified_poi_tag 在顶层。
+    """
+    uid = r.get("uid")
+    loc = r.get("location") or {}
+    if not uid or not loc.get("lat") or not loc.get("lng"):
+        return None
+    name = r.get("name") or ""
+    tag = str(r.get("classified_poi_tag") or r.get("tag") or "")
+    olat, olng = _origin_pair()
+    distance = _haversine_m(olat, olng, float(loc["lat"]), float(loc["lng"]))
+    area = " ".join(x for x in (r.get("province"), r.get("city"), r.get("district")) if x)
+    return {
+        "uid": str(uid),
+        "名称": name,
+        "地址": r.get("address") or "",
+        "行政区": area,
+        "坐标": f"{loc['lat']},{loc['lng']}",
+        "直线距离_米": distance,
+        "类型标签": tag,
+        "是餐饮": is_dining(name, tag, category_search=False),
+        "在范围内": distance <= RADIUS_TOLERANCE_M,
+        "范围说明": (
+            f"出发点 {RADIUS_M / 1000:.0f} 公里内" if distance <= RADIUS_TOLERANCE_M
+            else f"超出校区范围（直线 {distance} 米）"
+        ),
+        "来源": "百度地图 place/v2/suggestion",
+    }
+
+
 def _search_status() -> str:
     return getattr(_TLS, "search_status", gw.OK)
 
@@ -401,6 +457,27 @@ def enrich_poi_from_kb(poi: Dict[str, Any]) -> Dict[str, Any]:
     return poi
 
 
+def _coord_from_suggestion(name: str) -> Optional[Dict[str, Any]]:
+    """用输入提示给「知识库有资料但没坐标」的店补一个坐标。
+
+    本地知识库的坐标是人工整理的，缺坐标很常见（B记鱼粥就是这样）。
+    以前缺坐标就直接收工，只能告诉用户「位置待确认」——但地图其实有这家店，
+    只是 place/v2/search 搜不到。这里用 suggestion 试一次，补上就能正常导航。
+    """
+    target = (name or "").strip()
+    if not target:
+        return None
+    for raw in _suggestion_query(target):
+        poi = _normalize_suggestion(raw)
+        if not poi or poi.get("是餐饮") is False:
+            continue
+        poi_name = str(poi.get("名称") or "")
+        # 名称互相包含即视为同一家（"B记鱼粥" ⊂ "广州市·B记鱼粥"）
+        if target in poi_name or poi_name in target or _name_similarity(target, poi_name) >= 0.6:
+            return poi
+    return None
+
+
 def find_restaurant(
     name: str,
     poi_store: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -421,41 +498,51 @@ def find_restaurant(
     #    证明不了它在哪。此时继续联网检索，把坐标补上。
     kb = _kb_lookup(store_name)
     if kb and not str(kb.get("坐标") or "").strip():
-        # 知识库确认存在，但缺坐标：只展示资料，不做导航，也不许换店。
-        # 不能因为地图上只有"门前停车场"就反过来说这家店不存在——两者是不同的事实。
-        walk = (kb.get("交通") or {}).get("步行")
-        is_delivery = str(kb.get("类别") or "") == "外卖"
-        payload = {
-            "状态": "kb_no_coord",
-            "来源": "本地真实知识库",
-            "名称": kb.get("正式名称") or kb.get("名称") or kb.get("店名"),
-            "别名": kb.get("别名") or [],
-            "地址": kb.get("地址") or "待确认",
-            "坐标": None,
-            "类别": kb.get("类别"),
-            "人均": kb.get("人均"),
-            "人均性质": "攻略整理/预估" if kb.get("测评来源") else "待确认",
-            "口碑": kb.get("一句话点评") or "",
-            "数据来源": kb.get("测评来源") or "待确认",
-            "提示": (
-                "外卖店，无公开地图点位属于正常情况（群内下单/配送到校）。"
-                if is_delivery else
-                "知识库确认这家店存在，但暂无核实过的坐标，因此无法生成导航。"
-            ),
-            "要求": (
-                "如实说明：资料里有这家店，但位置待确认，所以不提供步行时间、距离、导航和推荐卡片；"
-                "可以给出攻略里的人均/口碑并标注来源与『待核实』；"
-                "不要因为地图只搜到停车场就断言这家店不存在，也不要替换成其他店。"
-            ),
-        }
-        if is_delivery:
-            payload["配送参考"] = (
-                f"{kb.get('平均配送分钟')} 分钟（预估）" if kb.get("平均配送分钟") else "待确认"
-            )
-            payload["下单入口"] = "具体下单入口待确认（群内下单/配送到校）"
-        elif walk:
-            payload["攻略步行参考"] = f"{walk} 分钟（攻略整理，未经路线接口核实）"
-        return json.dumps(payload, ensure_ascii=False)
+        # 知识库确认存在但缺坐标：先用输入提示试着把坐标补上（地图往往有这家店，
+        # 只是 place/v2/search 搜不到）。补到就正常走下面的 kb_hit 流程。
+        kb_name = kb.get("正式名称") or kb.get("名称") or kb.get("店名") or store_name
+        fixed = _coord_from_suggestion(str(kb_name))
+        if fixed:
+            kb = dict(kb)
+            kb["坐标"] = fixed["坐标"]
+            kb["地图uid"] = fixed["uid"]
+            if not str(kb.get("地址") or "").strip():
+                kb["地址"] = fixed.get("地址") or ""
+        else:
+            # 补不到才退回「只展示资料、不给导航」——绝不能因为地图没搜到就否认这家店存在
+            walk = (kb.get("交通") or {}).get("步行")
+            is_delivery = str(kb.get("类别") or "") == "外卖"
+            payload = {
+                "状态": "kb_no_coord",
+                "来源": "本地真实知识库",
+                "名称": kb.get("正式名称") or kb.get("名称") or kb.get("店名"),
+                "别名": kb.get("别名") or [],
+                "地址": kb.get("地址") or "待确认",
+                "坐标": None,
+                "类别": kb.get("类别"),
+                "人均": kb.get("人均"),
+                "人均性质": "攻略整理/预估" if kb.get("测评来源") else "待确认",
+                "口碑": kb.get("一句话点评") or "",
+                "数据来源": kb.get("测评来源") or "待确认",
+                "提示": (
+                    "外卖店，无公开地图点位属于正常情况（群内下单/配送到校）。"
+                    if is_delivery else
+                    "知识库确认这家店存在，但暂无核实过的坐标，因此无法生成导航。"
+                ),
+                "要求": (
+                    "如实说明：资料里有这家店，但位置待确认，所以不提供步行时间、距离、导航和推荐卡片；"
+                    "可以给出攻略里的人均/口碑并标注来源与『待核实』；"
+                    "不要因为地图只搜到停车场就断言这家店不存在，也不要替换成其他店。"
+                ),
+            }
+            if is_delivery:
+                payload["配送参考"] = (
+                    f"{kb.get('平均配送分钟')} 分钟（预估）" if kb.get("平均配送分钟") else "待确认"
+                )
+                payload["下单入口"] = "具体下单入口待确认（群内下单/配送到校）"
+            elif walk:
+                payload["攻略步行参考"] = f"{walk} 分钟（攻略整理，未经路线接口核实）"
+            return json.dumps(payload, ensure_ascii=False)
 
     if kb:
         coord = kb.get("坐标")
@@ -505,6 +592,31 @@ def find_restaurant(
             scope_text = label
             break
 
+    def _rank(items: List[Dict[str, Any]]) -> List[Any]:
+        ranked = [(_name_similarity(store_name, p["名称"]), p) for p in items]
+        ranked.sort(key=lambda x: (-x[0], x[1]["直线距离_米"]))
+        return ranked
+
+    scored = _rank(candidates)
+    best_score = scored[0][0] if scored else 0.0
+
+    # 4) 输入提示兜底：place/v2/search 索引覆盖不全时，这里往往能精确命中
+    #    （达海煲仔饭、B记鱼粥都是 search 搜不到、suggestion 能搜到的真实案例）
+    if not scored or best_score < 0.6:
+        sug_pois = [
+            p for p in (_normalize_suggestion(x) for x in _suggestion_query(store_name)) if p
+        ]
+        if sug_pois:
+            merged: Dict[str, Dict[str, Any]] = {p["uid"]: p for p in candidates}
+            for p in sug_pois:
+                merged.setdefault(p["uid"], p)  # search 已有的保留（信息更全）
+            rescored = _rank(list(merged.values()))
+            if rescored and (not scored or rescored[0][0] > best_score):
+                candidates = list(merged.values())
+                scored = rescored
+                best_score = scored[0][0]
+                scope_text = "广州市范围（按店名输入提示匹配）"
+
     if not candidates:
         ok_statuses = [s for s in statuses if s == gw.OK]
         if not ok_statuses:
@@ -515,7 +627,7 @@ def find_restaurant(
             {
                 "状态": gw.NO_RESULT,
                 "店名": store_name,
-                "提示": f"地图上没有检索到「{store_name}」这家店（3 公里内与广州市范围都没有）。",
+                "提示": f"地图上没有检索到「{store_name}」这家店（3 公里内、广州市范围、店名输入提示都没有）。",
                 "要求": (
                     "如实告诉用户没查到，并请对方补充校门/地标/地址再确认；"
                     "绝对不要用别的店当答案，也不要说成『附近没有好吃的』。"
@@ -524,11 +636,6 @@ def find_restaurant(
             ensure_ascii=False,
         )
 
-    scored = []
-    for poi in candidates:
-        score = _name_similarity(store_name, poi["名称"])
-        scored.append((score, poi))
-    scored.sort(key=lambda x: (-x[0], x[1]["直线距离_米"]))
     best_score, best = scored[0]
 
     # 附属设施（如"XX-门前停车场"）只能当线索：先在全市范围再找一次餐馆本体

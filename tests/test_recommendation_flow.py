@@ -484,6 +484,83 @@ def test_find_restaurant_confidence() -> None:
         rp.gw._do_http = original
 
 
+# ---------------- 16. 输入提示兜底：search 搜不到的店 ----------------
+
+def test_suggestion_fallback_finds_missing_shop() -> None:
+    print("[16] place/v2/search 搜不到的店：靠输入提示兜底找到（达海煲仔饭/B记鱼粥 真实案例）")
+    import tools.route_planner as rp
+
+    target = {
+        "name": "达海煲仔饭(南村店)",
+        "uid": "9fd49bfbf06b5a66128824c9",
+        "location": {"lat": 23.009331, "lng": 113.400713},
+        "province": "广东省", "city": "广州市", "district": "番禺区",
+        "address": "广州市-番禺区-兴业大道与市新公路交叉口东南方向82米左右",
+        "tag": "中餐馆", "classified_poi_tag": "美食;中餐馆",
+    }
+    wrong = {
+        "uid": "u_wrong", "name": "超级烤肉木桶饭(新造店)",
+        "location": {"lat": 23.02, "lng": 113.41}, "address": "新造镇三鑫公寓",
+        "detail_info": {"type": "cater", "tag": "美食;快餐"},
+    }
+    seen_paths: list[str] = []
+
+    def fake_http(path, params, ak=None):
+        seen_paths.append(path)
+        if "suggestion" in path:
+            return rp.gw.MapResult(rp.gw.OK, payload={"result": [target]})
+        # 完整店名在 search 里搜不到，只返回一个完全无关的候选
+        return rp.gw.MapResult(rp.gw.OK, payload={"status": 0, "results": [wrong]})
+
+    original = rp.gw._do_http
+    rp.gw._do_http = fake_http
+    try:
+        data = json.loads(rp.find_restaurant("达海煲仔饭", poi_store={}))
+        check("状态为 match", data.get("状态") == "match", str(data.get("状态")))
+        check("命中正确的店", data.get("名称") == "达海煲仔饭(南村店)", str(data.get("名称")))
+        check("用的是输入提示的 uid", data.get("uid") == "9fd49bfbf06b5a66128824c9", str(data.get("uid")))
+        check("确实走过 suggestion 接口", any("suggestion" in p for p in seen_paths), str(seen_paths))
+        check("不再拿无关候选当答案", data.get("名称") != "超级烤肉木桶饭(新造店)")
+    finally:
+        rp.gw._do_http = original
+
+
+def test_kb_missing_coord_filled_by_suggestion() -> None:
+    print("[17] 知识库有资料但缺坐标：用输入提示补坐标，不再止步于『位置待确认』")
+    import tools.route_planner as rp
+
+    target = {
+        "name": "广州市·B记鱼粥",
+        "uid": "e5c58be12ae80fc5a8059df2",
+        "location": {"lat": 23.022703, "lng": 113.400799},
+        "province": "广东省", "city": "广州市", "district": "番禺区",
+        "address": "广州市-番禺区-荣华里-5号楼",
+        "tag": "粥店", "classified_poi_tag": "美食;中餐馆",
+    }
+
+    def fake_http(path, params, ak=None):
+        if "suggestion" in path:
+            return rp.gw.MapResult(rp.gw.OK, payload={"result": [target]})
+        return rp.gw.MapResult(rp.gw.OK, payload={"status": 0, "results": []})
+
+    original_kb = rp._kb_lookup
+    original_http = rp.gw._do_http
+    # 模拟知识库里这条记录没有坐标
+    rp._kb_lookup = lambda name: {"名称": "B记鱼粥", "正式名称": "B记鱼粥", "类别": "周边堂食",
+                                  "地址": "", "坐标": "", "人均": 37,
+                                  "一句话点评": "砂锅生上鱼滑粥是必点"}
+    rp.gw._do_http = fake_http
+    try:
+        data = json.loads(rp.find_restaurant("B记鱼粥", poi_store={}))
+        check("补到坐标后状态为 kb_hit", data.get("状态") == "kb_hit", str(data.get("状态")))
+        check("坐标来自地图", str(data.get("坐标") or "").startswith("23.0227"), str(data.get("坐标")))
+        check("地址也补上了", "荣华里" in str(data.get("地址")), str(data.get("地址")))
+        check("不再是位置待确认", data.get("状态") != "kb_no_coord")
+    finally:
+        rp._kb_lookup = original_kb
+        rp.gw._do_http = original_http
+
+
 if __name__ == "__main__":
     test_japanese_delivery_cards()
     test_burger_delivery_params()
@@ -500,5 +577,7 @@ if __name__ == "__main__":
     test_auto_verify_route_fills_gap()
     test_strip_tool_echo()
     test_find_restaurant_confidence()
+    test_suggestion_fallback_finds_missing_shop()
+    test_kb_missing_coord_filled_by_suggestion()
     print(f"\n通过 {PASSED} 项" + ("" if not FAILED else f"，失败 {len(FAILED)} 项：{FAILED}"))
     raise SystemExit(0 if not FAILED else 1)
