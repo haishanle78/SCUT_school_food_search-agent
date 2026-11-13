@@ -19,7 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 
 config.MAP_ENABLED = True
-config.BAIDU_MAP_AK = config.BAIDU_MAP_AK or "test-ak"
+# 测试固定用单把假 AK：本文件验证的是「单 AK 配额耗尽后不再重复请求」，
+# 若沿用 .env 里真实的 AK 池（数量随部署变化），换 AK 重试是正确行为，
+# 断言「只调用 1 次」就会假失败。多 AK 负载均衡另有 test_concurrency 覆盖。
+config.BAIDU_MAP_AKS = ["test-ak"]
+config.BAIDU_MAP_AK = "test-ak"
 # 天气模块走真实网络，单测一律关闭（本文件只测地图治理）
 config.WEATHER_ENABLED = False
 

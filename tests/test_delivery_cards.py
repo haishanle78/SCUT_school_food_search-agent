@@ -35,7 +35,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         print(f"  FAIL {name}  {detail}")
 
 
-def make_agent() -> FoodAdvisorAgent:
+def make_agent(mode: str = "") -> FoodAdvisorAgent:
     agent = FoodAdvisorAgent.__new__(FoodAdvisorAgent)
     agent.profile = UserProfile()
     agent.poi_store = {}
@@ -48,6 +48,7 @@ def make_agent() -> FoodAdvisorAgent:
     agent.origin_key = config.DEFAULT_ORIGIN
     agent.origin = config.origin_by_key(agent.origin_key)
     agent._needed_modes = ["walking"]
+    agent._dining_mode = mode
     return agent
 
 
@@ -87,16 +88,28 @@ def test_delivery_card_without_route() -> None:
     check("近店不报超出配送半径", "超出" not in str(near_t.get("距离说明")), str(near_t))
 
 
-def test_delivery_without_coord_dropped() -> None:
-    print("[2] 外卖店没有坐标 → 仍然剔除")
-    agent = make_agent()
+def test_delivery_without_coord_kept_pending() -> None:
+    print("[2] 外卖店没有坐标 → 仍可推荐，但位置标待确认、不给导航")
+    agent = make_agent(mode="delivery")
     agent.poi_store["dl2"] = {
         "uid": "dl2", "名称": "遇见赣厨", "坐标": "", "是餐饮": True,
         "在范围内": True, "类别": "外卖", "路线": {},
     }
     cards = agent._inject_card_facts([{"uid": "dl2", "reason": "好吃"}])
-    check("无坐标被剔除", not cards)
-    check("剔除原因写明缺坐标", any("坐标" in d.get("原因", "") for d in agent.last_dropped), str(agent.last_dropped))
+    check("无坐标不再剔除（私域商家常常没有坐标）", len(cards) == 1, str(agent.last_dropped))
+    card = cards[0] if cards else {}
+    check("标记位置待确认", card.get("coordinate_pending") is True)
+    check("没有坐标就不给任何链接", card.get("route_link") is None)
+    check(
+        "距离说明写明位置待确认",
+        "位置待确认" in str((card.get("transport") or {}).get("距离说明")),
+        str(card.get("transport")),
+    )
+    check(
+        "不编造配送能力",
+        (card.get("transport") or {}).get("配送能力") in ("待确认", "知识库标注可外卖"),
+        str(card.get("transport")),
+    )
 
 
 def test_dine_in_still_needs_route() -> None:
@@ -125,8 +138,12 @@ def test_local_hit_registers_poi() -> None:
     store: dict = {}
     fs.food_search("外卖", poi_store=store)
     check("外卖本地命中已登记", bool(store), f"poi_store 条数 {len(store)}")
+    # 外卖场景不只收「外卖专营店」：知识库里的堂食店也可能接单，
+    # 只是后端没有配送依据，卡片会标「配送能力待确认」。
+    # 所以这里只要求有登记、且类别都是合法值，不再强求清一色「外卖」。
     kinds = {v.get("类别") for v in store.values()}
-    check("登记条目类别为外卖", kinds == {"外卖"}, str(kinds))
+    check("登记条目类别合法", kinds <= {"外卖", "周边堂食", "饭堂窗口"}, str(kinds))
+    check("外卖专营店仍在其中", "外卖" in kinds, str(kinds))
     with_coord = [v for v in store.values() if v.get("坐标")]
     check("有坐标的条目带 uid", all(v.get("uid") for v in with_coord))
 
@@ -194,7 +211,7 @@ def test_delivery_text_not_walk_talk() -> None:
 if __name__ == "__main__":
     config.KB_DEMO = False
     test_delivery_card_without_route()
-    test_delivery_without_coord_dropped()
+    test_delivery_without_coord_kept_pending()
     test_dine_in_still_needs_route()
     test_local_hit_registers_poi()
     test_far_branch_not_in_range()
